@@ -1,0 +1,23 @@
+diff --git a/server/src/lib.rs b/server/src/lib.rs
+index 262cff1..7ae6060 100644
+--- a/server/src/lib.rs
++++ b/server/src/lib.rs
+@@ -14,4 +14,4 @@ pub mod search_index;
+ pub mod utils;
+ 
+ pub use bootstrap::serve;
+-pub use state::AppState;
++pub use state::{build_app_state, AppState};
+diff --git a/server/src/state.rs b/server/src/state.rs
+index a800089..df5c3bf 100644
+--- a/server/src/state.rs
++++ b/server/src/state.rs
+@@ -62,7 +62,7 @@ impl AppState {
+ }
+ 
+ /// Build the application state with all caches and shared resources.
+-pub(crate) fn build_app_state(
++pub fn build_app_state(
+     pool: Pool<SqliteConnectionManager>,
+     search_index: Option<Arc<SearchIndex>>,
+ ) -> Arc<AppState> {

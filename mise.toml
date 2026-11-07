@@ -1,0 +1,64 @@
+# Development tools and tasks. Rust itself comes from rust-toolchain.toml.
+[tools]
+node = "26.13.0"
+git-cliff = "2.14.2"
+cargo-deny = "0.20.2"
+
+[tasks.patch]
+description = "Apply patches/ to the upstream submodules (skips the ones already applied)"
+run = "scripts/patch-upstream.sh"
+
+[tasks."web:install"]
+description = "Install the frontend's dependencies"
+depends = ["patch"]
+dir = "upstream/lrclib-homepage"
+run = "npm ci --no-audit --no-fund"
+sources = ["package.json", "package-lock.json"]
+outputs = ["node_modules/.package-lock.json"]
+
+[tasks."web:build"]
+description = "Build the frontend into upstream/lrclib-homepage/dist (embedded by the next cargo build)"
+depends = ["web:install"]
+dir = "upstream/lrclib-homepage"
+run = "npm run build"
+
+[tasks.dev]
+description = "Run the server on ./dev-data (updates off: put a dump in dev-data/dumps)"
+depends = ["patch"]
+run = "cargo run -- --data-dir dev-data --listen 127.0.0.1:3300 --update-interval 0"
+
+[tasks.fmt]
+description = "Format the Rust code"
+run = "cargo fmt --all"
+
+[tasks.lint]
+description = "rustfmt check and clippy"
+depends = ["patch"]
+run = ["cargo fmt --all --check", "cargo clippy --locked --all-targets"]
+
+[tasks.test]
+description = "Run the tests"
+depends = ["patch"]
+run = "cargo test --locked"
+
+[tasks.deny]
+description = "Audit dependencies: advisories, licenses, duplicates, sources"
+run = "cargo deny check"
+
+[tasks.ci]
+description = "What CI's check job runs: lint, tests, that the patches apply, that the frontend builds, action pins"
+depends = ["lint", "test", "web:build"]
+run = ["scripts/patch-upstream.sh --check", "scripts/check-actions.sh"]
+
+[tasks.check]
+description = "Everything CI checks"
+depends = ["ci", "deny"]
+
+[tasks.build]
+description = "Release build of the binary with the frontend embedded"
+depends = ["web:build"]
+run = "cargo build --locked --release"
+
+[tasks.docker]
+description = "Build the container image as lrclib-mirror:dev"
+run = "{{env.CONTAINER_ENGINE | default(value='docker')}} build -t lrclib-mirror:dev ."
