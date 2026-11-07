@@ -29,12 +29,12 @@ run = "cargo run -- --data-dir dev-data --listen 127.0.0.1:3300 --update-interva
 
 [tasks.fmt]
 description = "Format the Rust code"
-run = "cargo fmt --all"
+run = "cargo fmt"
 
 [tasks.lint]
 description = "rustfmt check and clippy"
 depends = ["patch"]
-run = ["cargo fmt --all --check", "cargo clippy --locked --all-targets"]
+run = ["cargo fmt --check", "cargo clippy --locked --all-targets"]
 
 [tasks.test]
 description = "Run the tests"
