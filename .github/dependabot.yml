@@ -1,0 +1,20 @@
+version: 2
+# Cargo.lock is updated by the daily Upstream workflow (`cargo update`): Dependabot doesn't fetch the submodule that
+# the server crate comes from. The frontend's package-lock.json is upstream's.
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    rebase-strategy: "auto"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns: ["*"]
+  - package-ecosystem: "docker"
+    directory: "/"
+    rebase-strategy: "auto"
+    schedule:
+      interval: "weekly"
+    groups:
+      docker:
+        patterns: ["*"]

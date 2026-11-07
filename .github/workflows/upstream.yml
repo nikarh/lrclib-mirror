@@ -1,0 +1,79 @@
+name: Upstream
+
+# Daily: moves the upstream submodules (lrclib, lrclib-homepage) to their newest commits and opens a pull request
+# with what changed upstream, or updates the one still open. Its branch is built as the `dev` pre-release and image
+# (Dev workflow). Merged, the next update opens a new pull request; when upstream has nothing new, nothing happens.
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream
+  cancel-in-progress: false
+
+env:
+  BRANCH: upstream-update
+
+jobs:
+  update:
+    name: Update upstream
+    if: github.repository_owner == 'nikarh'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    steps:
+      # The bot pushes the branch and opens the pull request, so that CI and Dev run for them.
+      - name: Generate GitHub token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: generate-token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          submodules: true
+          fetch-depth: 0
+          token: ${{ steps.generate-token.outputs.token }}
+      # For Cargo.lock; the toolchain comes from rust-toolchain.toml.
+      - run: rustup toolchain install --profile minimal
+      - name: Update the submodules
+        id: update
+        run: |
+          set -uo pipefail
+          scripts/update-upstream.sh "$RUNNER_TEMP/pr.md"
+          case $? in
+            0) echo "changed=true" >> "$GITHUB_OUTPUT" ;;
+            3) echo "changed=false" >> "$GITHUB_OUTPUT" ;;
+            *) exit 1 ;;
+          esac
+      - name: Push the branch and open or update the pull request
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          APP_SLUG: ${{ steps.generate-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          title=$(head -n 1 "$RUNNER_TEMP/pr.md")
+          tail -n +2 "$RUNNER_TEMP/pr.md" > "$RUNNER_TEMP/body.md"
+          user_id=$(gh api "users/$APP_SLUG%5Bbot%5D" --jq .id)
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add upstream Cargo.lock
+          git commit -q -m "$title"
+          # Always one commit on top of main: an open pull request is replaced, not stacked onto.
+          git push --force origin "$BRANCH"
+          pr=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')
+          if [[ -n $pr ]]; then
+            gh pr edit "$pr" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+            echo "Updated #$pr" >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh pr create --head "$BRANCH" --base main --title "$title" --body-file "$RUNNER_TEMP/body.md"
+            echo "Opened a pull request" >> "$GITHUB_STEP_SUMMARY"
+          fi

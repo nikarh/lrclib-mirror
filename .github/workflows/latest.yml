@@ -1,0 +1,50 @@
+name: Latest
+
+# Keeps the `latest` release at the tip of main: on every push the tag moves to the new commit and Publish builds,
+# signs and uploads the files, and pushes the `main` image. There are no versioned releases: what upstream changes
+# arrives through the Upstream workflow's pull requests.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: latest
+  cancel-in-progress: true
+
+jobs:
+  tag:
+    name: Move the latest tag
+    if: github.repository_owner == 'nikarh'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Generate GitHub token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: generate-token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - name: Move the tag and update the release
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: scripts/rolling-release.sh latest "Latest (${GITHUB_SHA:0:7})" --latest
+
+  publish:
+    name: Publish
+    needs: tag
+    # Publish pushes the image.
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish.yml
+    with:
+      tag: latest
+    secrets: inherit
