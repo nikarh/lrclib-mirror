@@ -18,7 +18,8 @@ There are no versions: the builds follow upstream.
 | Asset | Contents |
 | --- | --- |
 | `lrclib-mirror-x86_64-unknown-linux-musl` | The static binary |
-| `SHA256SUMS`, `SHA256SUMS.asc` | Its checksum and the detached GPG signature |
+| `LICENSE-lrclib`, `LICENSE-lrclib-homepage` | The upstream projects' MIT licenses, which apply to the code built in |
+| `SHA256SUMS`, `SHA256SUMS.asc` | Checksums of the files and their detached GPG signature |
 
 Dependabot's pull requests (actions, Docker base images) are merged by **Auto-merge** once every required check is
 green.

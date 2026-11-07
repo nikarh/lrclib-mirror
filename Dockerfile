@@ -20,10 +20,12 @@ COPY scripts/patch-upstream.sh scripts/
 COPY patches/lrclib patches/lrclib
 COPY upstream/lrclib upstream/lrclib
 RUN scripts/patch-upstream.sh
+COPY LICENSE-MIT LICENSE-APACHE ./
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY .cargo .cargo
 COPY src src
 COPY --from=web /src/upstream/lrclib-homepage/dist upstream/lrclib-homepage/dist
+COPY --from=web /src/upstream/lrclib-homepage/LICENSE upstream/lrclib-homepage-LICENSE
 # The build context has no git metadata: the upstream commits for --version.
 ARG LRCLIB_COMMIT="" LRCLIB_HOMEPAGE_COMMIT="" LRCLIB_MIRROR_VERSION_SUFFIX=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -33,6 +35,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     mkdir -p /rootfs/etc/ssl/certs; \
     cp target/release/lrclib-mirror /rootfs/lrclib-mirror; \
     cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/; \
+    # The upstream projects' MIT notices travel with their code.
+    mkdir -p /rootfs/licenses; \
+    cp LICENSE-MIT LICENSE-APACHE /rootfs/licenses/; \
+    cp upstream/lrclib/LICENSE /rootfs/licenses/LICENSE-lrclib; \
+    cp /src/upstream/lrclib-homepage-LICENSE /rootfs/licenses/LICENSE-lrclib-homepage; \
     # A new named volume mounted here copies this mode, so it is writable whichever user the container runs as.
     mkdir -m 1777 /rootfs/data
 
