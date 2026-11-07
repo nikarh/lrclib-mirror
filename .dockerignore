@@ -1,0 +1,6 @@
+**/.git
+target
+**/node_modules
+upstream/lrclib-homepage/dist
+ci-rootfs
+out

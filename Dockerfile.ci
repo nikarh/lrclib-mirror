@@ -1,0 +1,12 @@
+# The image CI publishes, from a binary CI has built already (.github/workflows/publish.yml): rebuilding inside Docker
+# would compile everything from scratch on every run. The Dockerfile next to this one builds the same image from source.
+FROM scratch
+COPY ci-rootfs/ /
+LABEL org.opencontainers.image.source="https://github.com/nikarh/lrclib-mirror" \
+      org.opencontainers.image.description="LRCLIB's API (read-only) and web search on a local copy of its public database dump" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0"
+USER 65534:65534
+EXPOSE 3300
+VOLUME /data
+HEALTHCHECK --interval=30s --timeout=5s CMD ["/lrclib-mirror", "healthcheck"]
+ENTRYPOINT ["/lrclib-mirror"]
