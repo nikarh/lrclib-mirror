@@ -1,0 +1,206 @@
+//! Configuration from command line flags, with environment variables as the fallback.
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::time::Duration;
+
+pub const DEFAULT_LISTING_URL: &str = "https://lrclib-db-dumps.bu3nnyut4y9jfkdg.workers.dev";
+pub const DEFAULT_DUMP_URL: &str = "https://db-dumps.lrclib.net";
+
+pub const HELP: &str = "\
+lrclib-mirror: the LRCLIB API (read-only) and web search on a local copy of LRCLIB's public database dump
+
+Usage: lrclib-mirror [serve] [OPTIONS]
+       lrclib-mirror healthcheck [--listen ADDR]
+
+Options (each has an environment variable fallback):
+  --data-dir DIR           LRCLIB_MIRROR_DATA_DIR       database dumps and the search index [/data]
+  --listen ADDR            LRCLIB_MIRROR_LISTEN         HTTP address [0.0.0.0:3300]
+  --update-interval TIME   LRCLIB_MIRROR_UPDATE_INTERVAL
+                                                        how often to check for a new dump (30m, 24h, 7d);
+                                                        0: never [24h]
+  --min-free-gb GB         LRCLIB_MIRROR_MIN_FREE_GB    free space a dump download needs [300]
+  --listing-url URL        LRCLIB_MIRROR_LISTING_URL    the dump listing [LRCLIB's]
+  --dump-url URL           LRCLIB_MIRROR_DUMP_URL       where dumps are downloaded from [LRCLIB's]
+  -h, --help               this help
+  -V, --version            the version and the upstream commits
+
+Logging: RUST_LOG (default info,tantivy=warn).";
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub data_dir: PathBuf,
+    pub listen: SocketAddr,
+    /// `None`: never check for a new dump (the newest dump in the data directory is served).
+    pub update_interval: Option<Duration>,
+    pub min_free_bytes: u64,
+    pub listing_url: String,
+    pub dump_url: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("{name}: invalid value {value:?}")]
+    Invalid { name: String, value: String },
+    #[error(transparent)]
+    Args(#[from] pico_args::Error),
+    #[error("unknown arguments: {0}")]
+    Unknown(String),
+}
+
+impl Config {
+    pub fn parse(args: &mut pico_args::Arguments) -> Result<Self, ConfigError> {
+        let data_dir: String = value(
+            args,
+            "--data-dir",
+            "LRCLIB_MIRROR_DATA_DIR",
+            "/data".to_owned(),
+        )?;
+        let listen = value(
+            args,
+            "--listen",
+            "LRCLIB_MIRROR_LISTEN",
+            SocketAddr::from(([0, 0, 0, 0], 3300)),
+        )?;
+        let interval: Interval = value(
+            args,
+            "--update-interval",
+            "LRCLIB_MIRROR_UPDATE_INTERVAL",
+            Interval(Some(Duration::from_hours(24))),
+        )?;
+        let min_free_gb: u64 = value(args, "--min-free-gb", "LRCLIB_MIRROR_MIN_FREE_GB", 300)?;
+        let listing_url = value(
+            args,
+            "--listing-url",
+            "LRCLIB_MIRROR_LISTING_URL",
+            DEFAULT_LISTING_URL.to_owned(),
+        )?;
+        let dump_url = value(
+            args,
+            "--dump-url",
+            "LRCLIB_MIRROR_DUMP_URL",
+            DEFAULT_DUMP_URL.to_owned(),
+        )?;
+
+        let rest = args.clone().finish();
+        if !rest.is_empty() {
+            let rest: Vec<_> = rest
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            return Err(ConfigError::Unknown(rest.join(" ")));
+        }
+
+        Ok(Self {
+            data_dir: PathBuf::from(data_dir),
+            listen,
+            update_interval: interval.0,
+            min_free_bytes: min_free_gb.saturating_mul(1 << 30),
+            listing_url,
+            dump_url: dump_url.trim_end_matches('/').to_owned(),
+        })
+    }
+}
+
+/// A duration like `90s`, `30m`, `24h` or `7d`; `0` is none.
+struct Interval(Option<Duration>);
+
+impl FromStr for Interval {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        if s == "0" {
+            return Ok(Self(None));
+        }
+        let split = s.find(|c: char| !c.is_ascii_digit()).ok_or(())?;
+        let (number, unit) = s.split_at(split);
+        let number: u64 = number.parse().map_err(|_| ())?;
+        let seconds = match unit {
+            "s" => 1,
+            "m" => 60,
+            "h" => 3600,
+            "d" => 86400,
+            _ => return Err(()),
+        };
+        match number.checked_mul(seconds) {
+            Some(0) => Ok(Self(None)),
+            Some(secs) => Ok(Self(Some(Duration::from_secs(secs)))),
+            None => Err(()),
+        }
+    }
+}
+
+/// The flag's value, else the environment variable's, else the default.
+fn value<T: FromStr>(
+    args: &mut pico_args::Arguments,
+    flag: &'static str,
+    env: &str,
+    default: T,
+) -> Result<T, ConfigError> {
+    let raw = match args.opt_value_from_str::<_, String>(flag)? {
+        Some(v) => (flag, v),
+        None => match std::env::var(env) {
+            Ok(v) if !v.is_empty() => (env, v),
+            _ => return Ok(default),
+        },
+    };
+    raw.1.parse().map_err(|_| ConfigError::Invalid {
+        name: raw.0.to_owned(),
+        value: raw.1,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Config, ConfigError> {
+        let mut args = pico_args::Arguments::from_vec(args.iter().map(Into::into).collect());
+        Config::parse(&mut args)
+    }
+
+    #[test]
+    fn flags_override_defaults() {
+        let c = parse(&[
+            "--data-dir",
+            "/x",
+            "--update-interval",
+            "0",
+            "--dump-url",
+            "http://h/",
+        ])
+        .unwrap();
+        assert_eq!(c.data_dir, PathBuf::from("/x"));
+        assert_eq!(c.update_interval, None);
+        assert_eq!(c.dump_url, "http://h");
+        assert_eq!(c.listen.port(), 3300);
+    }
+
+    #[test]
+    fn rejects_unknown_and_invalid() {
+        assert!(matches!(parse(&["--nope"]), Err(ConfigError::Unknown(_))));
+        assert!(matches!(
+            parse(&["--update-interval", "x"]),
+            Err(ConfigError::Invalid { .. })
+        ));
+        // a bare number has no unit
+        assert!(matches!(
+            parse(&["--update-interval", "24"]),
+            Err(ConfigError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn intervals() {
+        let interval = |s: &str| parse(&["--update-interval", s]).unwrap().update_interval;
+        assert_eq!(interval("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(interval("30m"), Some(Duration::from_mins(30)));
+        assert_eq!(interval("7d"), Some(Duration::from_hours(7 * 24)));
+        assert_eq!(interval("0"), None);
+        assert_eq!(
+            parse(&[]).unwrap().update_interval,
+            Some(Duration::from_hours(24))
+        );
+    }
+}
