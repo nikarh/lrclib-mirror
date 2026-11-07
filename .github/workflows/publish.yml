@@ -70,8 +70,6 @@ jobs:
           mkdir -p "$root/etc/ssl/certs"
           install -m 755 "$bin" "$root/lrclib-mirror"
           cp /etc/ssl/certs/ca-certificates.crt "$root/etc/ssl/certs/"
-          mkdir -p "$root/licenses"
-          cp LICENSE-MIT LICENSE-APACHE out/LICENSE-lrclib out/LICENSE-lrclib-homepage "$root/licenses/"
           # A new named volume copies this mode, so any uid can write the dumps.
           mkdir -m 1777 "$root/data"
       - name: Build the image

@@ -104,5 +104,5 @@ binary with the web search, `mise run docker` the image. `mise run patch` applie
 ## License
 
 This project's own code is MIT or Apache-2.0, at your option. The upstream projects are MIT licensed by their
-author, and so are the changes to them in `patches/`; their license texts come with every build (`/licenses` in the
-image, `LICENSE-lrclib*` with the release files). The LRCLIB database is LRCLIB's.
+author, and so are the changes to them in `patches/`; their license texts come with the release files
+(`LICENSE-lrclib*`). The LRCLIB database is LRCLIB's.
