@@ -16,7 +16,7 @@ Usage: lrclib-mirror [serve] [OPTIONS]
        lrclib-mirror healthcheck [--listen ADDR]
 
   import                   builds a store in the new directory OUT from DUMP (an LRCLIB dump: .sqlite3,
-                           .sqlite3.gz, or - for standard input)
+                           .sqlite3.gz, or - for standard input); run again, an interrupted import continues
 
 Options (each has an environment variable fallback):
   --data-dir DIR           LRCLIB_MIRROR_DATA_DIR       the stores, and dumps to import [/data]
