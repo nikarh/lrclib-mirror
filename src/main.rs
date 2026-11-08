@@ -16,6 +16,11 @@ use lrclib_mirror::mirror::Mirror;
 
 use lrclib_mirror::VERSION;
 
+/// mimalloc rather than the system's allocator: musl's, in the static binary, makes the importer several times slower
+/// (it reads many small rows), and glibc's keeps freed memory per thread.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let mut args = pico_args::Arguments::from_env();
     if args.contains(["-h", "--help"]) {
@@ -154,30 +159,43 @@ async fn signal() {
 
 /// Builds a store from a dump file.
 fn import(dump: &str, out: &std::path::Path, config: &Config) -> ExitCode {
-    if out.exists() {
-        return fail(&format!("{} exists", out.display()));
+    // Into a new directory, or to continue an interrupted import.
+    let empty = std::fs::read_dir(out).is_ok_and(|mut d| d.next().is_none());
+    if out.exists() && !empty && !store::is_import(out) {
+        return fail(&format!("{} exists and is not an import", out.display()));
     }
-    let input: Box<dyn std::io::Read> = if dump == "-" {
-        Box::new(std::io::stdin().lock())
+    if store::finished_store(out) {
+        return fail(&format!("{} is a finished store", out.display()));
+    }
+    let input: Box<dyn std::io::Read + Send> = if dump == "-" {
+        Box::new(std::io::stdin())
     } else {
         match std::fs::File::open(dump) {
-            Ok(f) => Box::new(std::io::BufReader::with_capacity(1 << 20, f)),
+            Ok(f) => Box::new(f),
             Err(e) => return fail(&format!("{dump}: {e}")),
         }
     };
-    let input: Box<dyn std::io::Read> = if std::path::Path::new(dump)
+    let input: Box<dyn std::io::Read + Send> = if std::path::Path::new(dump)
         .extension()
         .is_some_and(|e| e == "gz")
     {
         Box::new(dump::gunzip(input))
     } else {
-        input
+        Box::new(dump::read_ahead(input))
     };
-    let options = store::ImportOptions {
-        threads: config.import_threads,
-        memory: config.import_memory_bytes,
-        ..store::ImportOptions::default()
-    };
+    let mut options = store::ImportOptions::new(
+        config.import_threads,
+        config
+            .import_memory_bytes
+            .unwrap_or_else(store::default_memory),
+    );
+    if let Ok(every) = std::env::var("LRCLIB_MIRROR_CHECKPOINT_EVERY")
+        && let Ok(every) = every.parse()
+    {
+        // For the tests of interrupted imports.
+        options.checkpoint_every = every;
+    }
+    let input = (!store::dump_read(out)).then_some(input);
     let stop = std::sync::atomic::AtomicBool::new(false);
     match store::import(input, out, &options, &stop) {
         Ok(stats) => {

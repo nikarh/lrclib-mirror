@@ -84,6 +84,22 @@ impl IndexBuilder {
     pub fn create(dir: &Path, threads: usize, memory: usize) -> tantivy::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let index = Index::create_in_dir(dir, schema())?;
+        Self::with_index(index, threads, memory)
+    }
+
+    /// Continues an index being built: what was committed is kept (its commit's payload is returned), what wasn't
+    /// is dropped.
+    pub fn open(
+        dir: &Path,
+        threads: usize,
+        memory: usize,
+    ) -> tantivy::Result<(Self, Option<String>)> {
+        let index = Index::open_in_dir(dir)?;
+        let payload = index.load_metas()?.payload;
+        Ok((Self::with_index(index, threads, memory)?, payload))
+    }
+
+    fn with_index(index: Index, threads: usize, memory: usize) -> tantivy::Result<Self> {
         register_tokenizer(&index);
         let fields = Fields::of(&index.schema())?;
         let threads = threads.clamp(1, 8).min(memory / (16 << 20)).max(1);
@@ -112,6 +128,14 @@ impl IndexBuilder {
             }
         }
         self.writer.add_document(d)?;
+        Ok(())
+    }
+
+    /// Makes what was added durable, with `payload` (read back by [`Self::open`]).
+    pub fn commit(&mut self, payload: &str) -> tantivy::Result<()> {
+        let mut prepared = self.writer.prepare_commit()?;
+        prepared.set_payload(payload);
+        prepared.commit()?;
         Ok(())
     }
 

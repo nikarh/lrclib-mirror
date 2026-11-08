@@ -1,6 +1,6 @@
 [package]
 name = "lrclib-mirror"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.99"
 description = "A self-hosted LRCLIB: the LRCLIB server and web search on a local copy of LRCLIB's public database dump, kept up to date"
@@ -23,6 +23,7 @@ axum = "0.7"
 bytes = "1.12.1"
 collapse = "0.1.2"
 flate2 = { version = "1.1.11", features = ["zlib-rs"] }
+mimalloc = "0.1.52"
 pico-args = "0.5.0"
 regex = "1.13.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -25,12 +25,33 @@ pub enum StoreError {
     Io(PathBuf, std::io::Error),
     #[error("{0}: {1}")]
     Corrupt(PathBuf, String),
+    #[error("{0}: unfinished (no meta.json)")]
+    Unfinished(PathBuf),
     #[error("{0}: format {1}, this version reads format {FORMAT_VERSION}")]
     Format(PathBuf, u32),
     #[error("{0}: built by a version that normalizes names or builds lyrics differently")]
     Derivations(PathBuf),
     #[error("search index: {0}")]
     Search(String),
+}
+
+impl StoreError {
+    /// Whether the store is shown to be damaged (unfinished, a file missing or not what was written, unreadable
+    /// data): it can only be removed. Another version's store isn't damaged, and other errors (permissions, memory,
+    /// the disk) say nothing about the store.
+    #[must_use]
+    pub fn is_damage(&self) -> bool {
+        matches!(
+            self,
+            Self::Corrupt(..) | Self::Unfinished(..) | Self::Search(..)
+        )
+    }
+
+    /// Whether the store was built by a version that reads or computes it differently.
+    #[must_use]
+    pub fn is_other_version(&self) -> bool {
+        matches!(self, Self::Format(..) | Self::Derivations(..))
+    }
 }
 
 /// A track as LRCLIB's API answers it, borrowed from a decompressed block.
@@ -159,13 +180,40 @@ impl Store {
         let open = |name: &str| File::open(path(name)).map_err(|e| StoreError::Io(path(name), e));
         let corrupt = |name: &str, what: &str| StoreError::Corrupt(path(name), what.to_owned());
 
+        let meta = match std::fs::read(path(META)) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StoreError::Unfinished(dir.to_owned()));
+            }
+            Err(e) => return Err(StoreError::Io(path(META), e)),
+        };
         let meta: Meta =
-            serde_json::from_slice(&read(META)?).map_err(|e| corrupt(META, &e.to_string()))?;
+            serde_json::from_slice(&meta).map_err(|e| corrupt(META, &e.to_string()))?;
         if meta.format != FORMAT_VERSION {
             return Err(StoreError::Format(dir.to_owned(), meta.format));
         }
         if meta.derivations != super::derivations() {
             return Err(StoreError::Derivations(dir.to_owned()));
+        }
+        // Every file there, as large as written (a store finished before files.json existed is opened unchecked).
+        if let Ok(listed) = std::fs::read(path(super::FILES)) {
+            let listed: Vec<(String, u64)> = serde_json::from_slice(&listed)
+                .map_err(|e| corrupt(super::FILES, &e.to_string()))?;
+            for (name, size) in listed {
+                match std::fs::metadata(path(&name)) {
+                    Ok(m) if m.len() == size => {}
+                    Ok(m) => {
+                        return Err(corrupt(
+                            &name,
+                            &format!("{} bytes, {size} written", m.len()),
+                        ));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(corrupt(&name, "missing"));
+                    }
+                    Err(e) => return Err(StoreError::Io(path(&name), e)),
+                }
+            }
         }
         let track_blocks: Vec<TrackBlock> = read(TRACKS_INDEX)?
             .as_chunks::<20>()

@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::{BufWriter, Read, Write as _};
+use std::io::{BufWriter, Read, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -21,6 +21,8 @@ use crate::lyricsfile;
 use crate::search;
 use crate::sqlite::{self, Value};
 use crate::text::{normalize, plain_from_lrc, synced_skeleton};
+
+use super::file;
 
 use super::{
     FORMAT_VERSION, IDS, L_INSTRUMENTAL, L_LF_SHIFT, L_PLAIN_SHIFT, L_SYNCED_SHIFT, L_WORD_SYNC,
@@ -56,18 +58,64 @@ pub struct ImportOptions {
     pub level: i32,
     /// Memory for the search index writer.
     pub index_memory: usize,
-    /// Memory for the buckets being built in pass 2 (roughly).
+    /// Memory for the buckets being made in pass 2, roughly.
     pub memory: usize,
+    /// Pass 2 makes what it wrote durable every this many buckets (of 1024): an interrupted import continues from
+    /// there.
+    pub checkpoint_every: usize,
 }
 
 impl Default for ImportOptions {
     fn default() -> Self {
+        Self::new(
+            std::thread::available_parallelism().map_or(2, std::num::NonZero::get),
+            default_memory(),
+        )
+    }
+}
+
+/// What pass 1 takes besides its buffers per bucket (the routing tables, the reading), and the id map of pass 2.
+const FIXED_MEMORY: u64 = 400 << 20;
+const MIN_MEMORY: u64 = 768 << 20;
+
+impl ImportOptions {
+    /// Options for `threads` threads and about `memory` bytes in all.
+    #[must_use]
+    pub fn new(threads: usize, memory: u64) -> Self {
+        let memory = memory.max(MIN_MEMORY);
+        let spare = memory - FIXED_MEMORY;
+        let index = (spare / 6).clamp(48 << 20, 256 << 20);
         Self {
-            threads: std::thread::available_parallelism().map_or(2, std::num::NonZero::get),
+            threads: threads.max(1),
             level: 9,
-            index_memory: 256 << 20,
-            memory: 1 << 30,
+            index_memory: usize::try_from(index).unwrap_or(usize::MAX),
+            memory: usize::try_from(spare - index).unwrap_or(usize::MAX),
+            checkpoint_every: 128,
         }
+    }
+}
+
+/// The memory an import takes by default: 60% of what the process may use (its container's limit, or the machine's
+/// memory), between 768 MB and 4 GB (more makes little difference).
+#[must_use]
+pub fn default_memory() -> u64 {
+    memory_limit().map_or(1 << 30, |limit| (limit / 5 * 3).clamp(MIN_MEMORY, 4 << 30))
+}
+
+/// The memory the process may use: the cgroup's limit (a container's), or the machine's memory.
+#[must_use]
+pub fn memory_limit() -> Option<u64> {
+    let read = |path: &str| std::fs::read_to_string(path).ok();
+    let cgroup = read("/sys/fs/cgroup/memory.max")
+        .or_else(|| read("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    let total = read("/proc/meminfo").and_then(|s| {
+        let line = s.lines().find(|l| l.starts_with("MemTotal:"))?;
+        Some(line.split_whitespace().nth(1)?.parse::<u64>().ok()? * 1024)
+    });
+    match (cgroup, total) {
+        (Some(c), Some(t)) => Some(c.min(t)),
+        (c, t) => c.or(t),
     }
 }
 
@@ -131,42 +179,196 @@ struct TrackRow {
     broken: bool,
 }
 
-/// Builds the store `out` (a new directory) from the dump read from `input` (an SQLite database file as a stream).
-/// `stop` aborts it.
+/// Builds the store `out` from the dump read from `input` (an SQLite database file as a stream). `stop` aborts it.
+///
+/// An import interrupted (stopped, killed, or the machine losing power) continues where it can when run again into
+/// the same `out`: once the dump has been read (`import.json`), `input` isn't needed anymore (it may be `None`), and
+/// pass 2 continues from its last checkpoint. One interrupted while reading the dump starts over. A finished store
+/// (`meta.json`, written last) is left as it is.
 pub fn import<R: Read>(
-    input: R,
+    input: Option<R>,
     out: &Path,
     options: &ImportOptions,
     stop: &AtomicBool,
 ) -> Result<ImportStats, ImportError> {
     std::fs::create_dir_all(out).map_err(io(out))?;
+    if let Some(meta) = finished(out) {
+        return Ok(meta.stats);
+    }
     let tmp = out.join("tmp");
-    std::fs::create_dir_all(&tmp).map_err(io(&tmp))?;
-    let mut stats = ImportStats::default();
-
-    let started = Instant::now();
-    let pass1 = pass1(input, &tmp, options, stop, &mut stats)?;
-    stats.seconds_pass1 = started.elapsed().as_secs();
     tracing::info!(
-        tracks = stats.tracks,
-        lyrics = stats.lyrics_rows,
-        seconds = stats.seconds_pass1,
-        "dump read"
+        threads = options.threads,
+        bucket_memory_mb = options.memory >> 20,
+        index_memory_mb = options.index_memory >> 20,
+        "importing"
     );
+    let mut progress = if let Some(progress) = read_progress(out) {
+        tracing::info!(
+            buckets_done = progress.checkpoint.as_ref().map_or(0, |c| c.buckets),
+            "the dump was read before; continuing"
+        );
+        progress
+    } else {
+        let input = input.ok_or_else(|| ImportError::Data("no dump to read".to_owned()))?;
+        // Whatever an import interrupted while reading the dump left.
+        clear_dir(out)?;
+        std::fs::create_dir_all(&tmp).map_err(io(&tmp))?;
+        let mut stats = ImportStats::default();
+        let started = Instant::now();
+        let max_track_id = pass1(input, &tmp, options, stop, &mut stats)?;
+        stats.seconds_pass1 = started.elapsed().as_secs();
+        tracing::info!(
+            tracks = stats.tracks,
+            lyrics = stats.lyrics_rows,
+            seconds = stats.seconds_pass1,
+            "dump read"
+        );
+        // The buckets on disk before they are what an interrupted import continues from.
+        for entry in std::fs::read_dir(&tmp).map_err(io(&tmp))?.flatten() {
+            File::open(entry.path())
+                .and_then(|f| f.sync_all())
+                .map_err(io(&entry.path()))?;
+        }
+        file::sync_dir(&tmp).map_err(io(&tmp))?;
+        let progress = Progress {
+            format: FORMAT_VERSION,
+            derivations: super::derivations(),
+            max_track_id,
+            stats,
+            dictionaries: false,
+            checkpoint: None,
+        };
+        write_progress(out, &progress)?;
+        progress
+    };
 
     let started = Instant::now();
-    let meta = pass2(&tmp, out, &pass1, options, stop, &mut stats)?;
-    stats.seconds_pass2 = started.elapsed().as_secs();
+    let meta = pass2(&tmp, out, &mut progress, options, stop)?;
+    let mut stats = meta.stats.clone();
+    stats.seconds_pass2 += started.elapsed().as_secs();
     let meta = Meta {
         stats: stats.clone(),
         ..meta
     };
-    std::fs::remove_dir_all(&tmp).map_err(io(&tmp))?;
-    let path = out.join(META);
-    let json =
-        serde_json::to_vec_pretty(&meta).map_err(|e| ImportError::Io(path.clone(), e.into()))?;
-    write_synced(&path, &json)?;
+    finish(out, &meta)?;
     Ok(stats)
+}
+
+/// The store's `meta.json`, when `out` is a finished store.
+fn finished(out: &Path) -> Option<Meta> {
+    serde_json::from_slice(&std::fs::read(out.join(META)).ok()?).ok()
+}
+
+/// Removes what is in `dir` (not `dir` itself).
+fn clear_dir(dir: &Path) -> Result<(), ImportError> {
+    for entry in std::fs::read_dir(dir).map_err(io(dir))?.flatten() {
+        let path = entry.path();
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        removed.map_err(io(&path))?;
+    }
+    Ok(())
+}
+
+/// Finishes a store: its files listed (`files.json`), then `meta.json`, which marks it finished; then the import's
+/// leftovers removed.
+fn finish(out: &Path, meta: &Meta) -> Result<(), ImportError> {
+    let tmp = out.join("tmp");
+    std::fs::remove_dir_all(&tmp).map_err(io(&tmp))?;
+    let _ = std::fs::remove_file(out.join(PROGRESS));
+    remove_ids_partials(out, None);
+    let files = super::list_files(out).map_err(io(out))?;
+    let path = out.join(super::FILES);
+    let data =
+        serde_json::to_vec_pretty(&files).map_err(|e| ImportError::Io(path.clone(), e.into()))?;
+    file::write_atomic(&path, &data).map_err(io(&path))?;
+    let path = out.join(META);
+    let data =
+        serde_json::to_vec_pretty(meta).map_err(|e| ImportError::Io(path.clone(), e.into()))?;
+    file::write_atomic(&path, &data).map_err(io(&path))
+}
+
+/// `import.json`: the dump was read (pass 1 is done), and how far pass 2 got.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Progress {
+    format: u32,
+    derivations: u64,
+    max_track_id: u32,
+    /// What pass 1 found.
+    stats: ImportStats,
+    /// The compression dictionaries are written.
+    dictionaries: bool,
+    checkpoint: Option<Checkpoint>,
+}
+
+/// Pass 2's output files as they were after `buckets` buckets.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Checkpoint {
+    buckets: usize,
+    tracks: u64,
+    tracks_index: u64,
+    lyrics: u64,
+    lyrics_index: u64,
+    ordinal: u32,
+    lyrics_ordinal: u32,
+    track_blocks: u32,
+    lyrics_blocks: u32,
+    stats: ImportStats,
+}
+
+const PROGRESS: &str = "import.json";
+/// The id map as of a checkpoint (by its bucket count): a checkpoint written but not yet recorded in `import.json`
+/// doesn't replace the one recorded.
+fn ids_partial(buckets: usize) -> String {
+    format!("ids.{buckets:04}.partial")
+}
+
+/// Removes the id maps of checkpoints but `keep`'s.
+fn remove_ids_partials(out: &Path, keep: Option<usize>) {
+    let keep = keep.map(ids_partial);
+    for entry in std::fs::read_dir(out).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let partial = name.starts_with("ids.") && name.ends_with(".partial");
+        if partial && keep.as_deref() != Some(name.as_str()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// The progress of an interrupted import into `out` that can continue (by this version).
+fn read_progress(out: &Path) -> Option<Progress> {
+    let progress: Progress =
+        serde_json::from_slice(&std::fs::read(out.join(PROGRESS)).ok()?).ok()?;
+    (progress.format == FORMAT_VERSION && progress.derivations == super::derivations())
+        .then_some(progress)
+}
+
+fn write_progress(out: &Path, progress: &Progress) -> Result<(), ImportError> {
+    let path = out.join(PROGRESS);
+    let data =
+        serde_json::to_vec_pretty(progress).map_err(|e| ImportError::Io(path.clone(), e.into()))?;
+    file::write_atomic(&path, &data).map_err(io(&path))
+}
+
+/// Whether `out` is a finished store.
+#[must_use]
+pub fn finished_store(out: &Path) -> bool {
+    finished(out).is_some()
+}
+
+/// Whether `out` is an import (finished or not): what `import` may continue into.
+#[must_use]
+pub fn is_import(out: &Path) -> bool {
+    out.join(PROGRESS).exists() || out.join("tmp").is_dir() || finished(out).is_some()
+}
+
+/// Whether an import into `out` has read the dump: run again, it continues without it.
+#[must_use]
+pub fn dump_read(out: &Path) -> bool {
+    finished(out).is_some() || read_progress(out).is_some()
 }
 
 /// The memory of the process (anonymous: without the files it maps), for the progress log; 0 where unknown.
@@ -178,12 +380,6 @@ fn rss_mb() -> u64 {
             line.split_whitespace().nth(1)?.parse::<u64>().ok()
         })
         .map_or(0, |kb| kb >> 10)
-}
-
-fn write_synced(path: &Path, data: &[u8]) -> Result<(), ImportError> {
-    let mut f = File::create(path).map_err(io(path))?;
-    f.write_all(data).map_err(io(path))?;
-    f.sync_all().map_err(io(path))
 }
 
 /// A bucket file being written: rows are buffered and appended as zstd frames, each `[len u32][frame]`.
@@ -266,11 +462,6 @@ fn bucket_path(tmp: &Path, kind: &str, bucket: usize) -> PathBuf {
 
 fn bucket_of(key: u64) -> usize {
     usize::try_from(key >> (64 - BUCKET_BITS)).unwrap_or(0)
-}
-
-/// What pass 1 leaves for pass 2.
-struct Pass1 {
-    max_track_id: u32,
 }
 
 /// Where lyrics rows go: the buckets of the tracks pointing to them, by lyrics id.
@@ -408,6 +599,29 @@ fn table(types: &[u64]) -> Table {
     Table::Other
 }
 
+/// Puts a track row into its bucket, and notes which bucket its lyrics go to. Returns its id.
+fn route_track(
+    rowid: i64,
+    payload: &[u8],
+    tracks: &mut [BucketFile],
+    wanted: &mut Wanted,
+) -> Result<u32, ImportError> {
+    let values = sqlite::decode_record(payload)?;
+    let track = track_row(rowid, &values)?;
+    let key = sort_key(track.artist_lower.as_deref(), track.name_lower.as_deref());
+    let bucket = bucket_of(key);
+    if let Some(lyrics_id) = track.last_lyrics_id {
+        #[allow(clippy::cast_possible_truncation)] // < BUCKETS
+        wanted.want(lyrics_id, bucket as u16);
+    }
+    let mut record = Vec::with_capacity(128);
+    encode_track_row(&track, &mut record);
+    if let Some(file) = tracks.get_mut(bucket) {
+        file.push(&record)?;
+    }
+    Ok(track.id)
+}
+
 /// An error of a scan: the importer's own (from the row callback), or the database's.
 fn scan_error(e: sqlite::SqliteError) -> ImportError {
     match e {
@@ -419,7 +633,10 @@ fn scan_error(e: sqlite::SqliteError) -> ImportError {
     }
 }
 
-type Job = (u32, usize, Vec<u8>);
+/// Lyrics rows to reduce: `(lyrics id, bucket, record)`. Sent in batches, which keeps the threads from waiting on
+/// each other for every row.
+type Job = Vec<(u32, usize, Vec<u8>)>;
+const BATCH_ROWS: usize = 64;
 
 /// Threads reducing lyrics rows (`(lyrics id, bucket, record)`) into their buckets. An error is kept in `failed`.
 fn spawn_reducers(
@@ -447,14 +664,16 @@ fn spawn_reducers(
                         Ok(rx) => rx.recv(),
                         Err(_) => return,
                     };
-                    let Ok((lyrics_id, bucket, payload)) = job else {
+                    let Ok(batch) = job else {
                         return;
                     };
-                    if let Err(e) =
-                        reduce_and_route(lyrics_id, bucket, &payload, &lyrics, &counters)
-                        && let Ok(mut f) = failed.lock()
-                    {
-                        f.get_or_insert(e);
+                    for (lyrics_id, bucket, payload) in batch {
+                        if let Err(e) =
+                            reduce_and_route(lyrics_id, bucket, &payload, &lyrics, &counters)
+                            && let Ok(mut f) = failed.lock()
+                        {
+                            f.get_or_insert(e);
+                        }
                     }
                 }
             })
@@ -469,7 +688,7 @@ fn pass1<R: Read>(
     options: &ImportOptions,
     stop: &AtomicBool,
     stats: &mut ImportStats,
-) -> Result<Pass1, ImportError> {
+) -> Result<u32, ImportError> {
     let mut tracks: Vec<BucketFile> = (0..BUCKETS)
         .map(|b| BucketFile::new(bucket_path(tmp, "tracks", b), TRACKS_FRAME))
         .collect();
@@ -485,6 +704,7 @@ fn pass1<R: Read>(
 
     let (tx, workers) = spawn_reducers(options.threads, &lyrics, &counters, &failed);
 
+    let mut batch: Job = Vec::with_capacity(BATCH_ROWS);
     let spill = tmp.join("spill");
     let mut rows = 0u64;
     let scanned = sqlite::scan(input, &spill, |rowid, payload| {
@@ -506,21 +726,9 @@ fn pass1<R: Read>(
         };
         match table(&types) {
             Table::Tracks => {
-                let values = sqlite::decode_record(payload)?;
-                let track = track_row(rowid, &values)?;
+                let id = route_track(rowid, payload, &mut tracks, &mut wanted)?;
                 stats.tracks += 1;
-                max_track_id = max_track_id.max(track.id);
-                let key = sort_key(track.artist_lower.as_deref(), track.name_lower.as_deref());
-                let bucket = bucket_of(key);
-                if let Some(lyrics_id) = track.last_lyrics_id {
-                    #[allow(clippy::cast_possible_truncation)] // < BUCKETS
-                    wanted.want(lyrics_id, bucket as u16);
-                }
-                let mut record = Vec::with_capacity(128);
-                encode_track_row(&track, &mut record);
-                if let Some(file) = tracks.get_mut(bucket) {
-                    file.push(&record)?;
-                }
+                max_track_id = max_track_id.max(id);
             }
             Table::Lyrics => {
                 let lyrics_id = id(rowid)?;
@@ -535,15 +743,26 @@ fn pass1<R: Read>(
                 };
                 // The rare lyrics rows several tracks point to are reduced once per bucket.
                 for bucket in std::iter::once(first).chain(more.into_iter().map(usize::from)) {
-                    if tx.send((lyrics_id, bucket, payload.to_vec())).is_err() {
-                        return Err(Box::new(ImportError::Data("a worker failed".to_owned())));
-                    }
+                    batch.push((lyrics_id, bucket, payload.to_vec()));
+                }
+                if batch.len() >= BATCH_ROWS
+                    && tx
+                        .send(std::mem::replace(
+                            &mut batch,
+                            Vec::with_capacity(BATCH_ROWS),
+                        ))
+                        .is_err()
+                {
+                    return Err(Box::new(ImportError::Data("a worker failed".to_owned())));
                 }
             }
             Table::Other => {}
         }
         Ok(())
     });
+    if !batch.is_empty() {
+        let _ = tx.send(batch);
+    }
     drop(tx);
     for w in workers {
         let _ = w.join();
@@ -569,7 +788,7 @@ fn pass1<R: Read>(
     }
 
     route_waiting(tmp, &lyrics, &mut wanted, stats)?;
-    Ok(Pass1 { max_track_id })
+    Ok(max_track_id)
 }
 
 /// Routes the lyrics that waited for their track, and copies lyrics to the buckets of tracks that pointed to them
@@ -1216,16 +1435,18 @@ struct Dicts {
 
 /// Trains the compression dictionaries on samples of a few buckets, in pieces the size of what they compress
 /// (zstd needs about a hundred times the dictionary's size of samples).
-fn train(tmp: &Path, level: i32, max_memory: u64) -> Result<Dicts, ImportError> {
+fn train(tmp: &Path, out: &Path, level: i32, max_memory: u64) -> Result<Dicts, ImportError> {
     let mut track_samples: Vec<Vec<u8>> = Vec::new();
     let mut lyrics_samples: Vec<Vec<u8>> = Vec::new();
+    // From the size of the track buckets (written in the dump's order, so the same however often the import is
+    // interrupted): roughly how many lyrics blocks the training buckets make (~40 tracks each, ~1.2 KB of temporary
+    // file), and how many to skip between samples.
     let all: u64 = (0..BUCKETS)
         .step_by(BUCKETS / TRAINING_BUCKETS)
-        .filter_map(|b| std::fs::metadata(bucket_path(tmp, "lyrics", b)).ok())
+        .filter_map(|b| std::fs::metadata(bucket_path(tmp, "tracks", b)).ok())
         .map(|m| m.len())
         .sum();
-    // Lyrics blocks of the training buckets (each ~25 KB of temporary file), and how many to skip between samples.
-    let blocks = usize::try_from(all / (25 << 10))
+    let blocks = usize::try_from(all / (48 << 10))
         .unwrap_or(usize::MAX)
         .max(1);
     let wanted = (LYRICS_DICT_BYTES * 100) / (8 << 10);
@@ -1250,11 +1471,25 @@ fn train(tmp: &Path, level: i32, max_memory: u64) -> Result<Dicts, ImportError> 
     };
     let tracks = dict(&track_samples, TRACKS_DICT_BYTES);
     let lyrics = dict(&lyrics_samples, LYRICS_DICT_BYTES);
-    write_synced(&tmp.join("..").join(TRACKS_DICT), &tracks)?;
-    write_synced(&tmp.join("..").join(LYRICS_DICT), &lyrics)?;
+    for (name, dict) in [(TRACKS_DICT, &tracks), (LYRICS_DICT, &lyrics)] {
+        let path = out.join(name);
+        file::write_atomic(&path, dict).map_err(io(&path))?;
+    }
     Ok(Dicts {
         tracks: zstd::dict::EncoderDictionary::copy(&tracks, level),
         lyrics: zstd::dict::EncoderDictionary::copy(&lyrics, level),
+    })
+}
+
+/// The dictionaries an interrupted import trained.
+fn load_dicts(out: &Path, level: i32) -> Result<Dicts, ImportError> {
+    let read = |name: &str| {
+        let path = out.join(name);
+        std::fs::read(&path).map_err(io(&path))
+    };
+    Ok(Dicts {
+        tracks: zstd::dict::EncoderDictionary::copy(&read(TRACKS_DICT)?, level),
+        lyrics: zstd::dict::EncoderDictionary::copy(&read(LYRICS_DICT)?, level),
     })
 }
 
@@ -1274,76 +1509,127 @@ struct Writer {
     lyrics: BufWriter<File>,
     lyrics_index: BufWriter<File>,
     tracks_at: u64,
+    tracks_index_at: u64,
     lyrics_at: u64,
+    lyrics_index_at: u64,
     ordinal: u32,
     lyrics_ordinal: u32,
     track_blocks: u32,
     lyrics_blocks: u32,
     ids: Vec<u32>,
     search: search::IndexBuilder,
+    /// Buckets from this one on are added to the search index (the ones before were committed to it).
+    search_from: usize,
     out: PathBuf,
 }
 
 impl Writer {
-    fn create(out: &Path, max_track_id: u32, options: &ImportOptions) -> Result<Self, ImportError> {
-        let open = |name: &str| -> Result<BufWriter<File>, ImportError> {
+    /// Opens the output files: new ones, or the ones of an interrupted import as they were at its last checkpoint.
+    fn open(out: &Path, progress: &Progress, options: &ImportOptions) -> Result<Self, ImportError> {
+        let checkpoint = progress.checkpoint.as_ref();
+        let open = |name: &str, len: u64| -> Result<BufWriter<File>, ImportError> {
             let path = out.join(name);
-            Ok(BufWriter::with_capacity(
-                1 << 20,
-                File::create(&path).map_err(io(&path))?,
-            ))
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(io(&path))?;
+            f.set_len(len).map_err(io(&path))?;
+            f.seek(SeekFrom::End(0)).map_err(io(&path))?;
+            Ok(BufWriter::with_capacity(1 << 20, f))
         };
-        let search =
-            search::IndexBuilder::create(&out.join(SEARCH), options.threads, options.index_memory)
-                .map_err(|e| ImportError::Search(e.to_string()))?;
-        Ok(Self {
-            tracks: open(TRACKS)?,
-            tracks_index: open(TRACKS_INDEX)?,
-            lyrics: open(LYRICS)?,
-            lyrics_index: open(LYRICS_INDEX)?,
-            tracks_at: 0,
-            lyrics_at: 0,
+        let search_dir = out.join(SEARCH);
+        let (search, search_from) = if let Some(c) = checkpoint {
+            let (search, payload) =
+                search::IndexBuilder::open(&search_dir, options.threads, options.index_memory)
+                    .map_err(|e| ImportError::Search(e.to_string()))?;
+            // Committed past the checkpoint (interrupted before the checkpoint was recorded): those buckets are in
+            // the index already.
+            let committed = payload.and_then(|p| p.parse::<usize>().ok()).unwrap_or(0);
+            (search, committed.max(c.buckets))
+        } else {
+            let _ = std::fs::remove_dir_all(&search_dir);
+            let search =
+                search::IndexBuilder::create(&search_dir, options.threads, options.index_memory)
+                    .map_err(|e| ImportError::Search(e.to_string()))?;
+            (search, 0)
+        };
+        let ids = match checkpoint {
+            Some(c) => {
+                let path = out.join(ids_partial(c.buckets));
+                let bytes = std::fs::read(&path).map_err(io(&path))?;
+                bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| u32::from_le_bytes(*b))
+                    .collect()
+            }
+            None => vec![0; progress.max_track_id as usize + 1],
+        };
+        let c = checkpoint.cloned().unwrap_or(Checkpoint {
+            buckets: 0,
+            tracks: 0,
+            tracks_index: 0,
+            lyrics: 0,
+            lyrics_index: 0,
             ordinal: 0,
             lyrics_ordinal: 0,
             track_blocks: 0,
             lyrics_blocks: 0,
-            ids: vec![0; max_track_id as usize + 1],
+            stats: ImportStats::default(),
+        });
+        Ok(Self {
+            tracks: open(TRACKS, c.tracks)?,
+            tracks_index: open(TRACKS_INDEX, c.tracks_index)?,
+            lyrics: open(LYRICS, c.lyrics)?,
+            lyrics_index: open(LYRICS_INDEX, c.lyrics_index)?,
+            tracks_at: c.tracks,
+            tracks_index_at: c.tracks_index,
+            lyrics_at: c.lyrics,
+            lyrics_index_at: c.lyrics_index,
+            ordinal: c.ordinal,
+            lyrics_ordinal: c.lyrics_ordinal,
+            track_blocks: c.track_blocks,
+            lyrics_blocks: c.lyrics_blocks,
+            ids,
             search,
+            search_from,
             out: out.to_owned(),
         })
     }
 
-    fn write(&mut self, bucket: BucketOut, stats: &mut ImportStats) -> Result<(), ImportError> {
+    /// Writes bucket `index`.
+    fn write(
+        &mut self,
+        bucket: BucketOut,
+        index: usize,
+        stats: &mut ImportStats,
+    ) -> Result<(), ImportError> {
         let path = self.out.clone();
+        let err = |x| ImportError::Io(path.clone(), x);
         let mut ordinal = self.ordinal;
         for (key, n, block) in &bucket.track_blocks {
             // first key, first ordinal, offset
-            self.tracks_index
-                .write_all(&key.to_le_bytes())
-                .map_err(|x| ImportError::Io(path.clone(), x))?;
-            self.tracks_index
-                .write_all(&ordinal.to_le_bytes())
-                .map_err(|x| ImportError::Io(path.clone(), x))?;
-            self.tracks_index
-                .write_all(&self.tracks_at.to_le_bytes())
-                .map_err(|x| ImportError::Io(path.clone(), x))?;
-            self.tracks
-                .write_all(block)
-                .map_err(|x| ImportError::Io(path.clone(), x))?;
+            let mut entry = [0u8; 20];
+            entry[..8].copy_from_slice(&key.to_le_bytes());
+            entry[8..12].copy_from_slice(&ordinal.to_le_bytes());
+            entry[12..].copy_from_slice(&self.tracks_at.to_le_bytes());
+            self.tracks_index.write_all(&entry).map_err(err)?;
+            self.tracks_index_at += 20;
+            self.tracks.write_all(block).map_err(err)?;
             self.tracks_at += block.len() as u64;
             ordinal += n;
             self.track_blocks += 1;
         }
         for (n, block) in &bucket.lyrics_blocks {
-            self.lyrics_index
-                .write_all(&self.lyrics_ordinal.to_le_bytes())
-                .map_err(|x| ImportError::Io(path.clone(), x))?;
-            self.lyrics_index
-                .write_all(&self.lyrics_at.to_le_bytes())
-                .map_err(|x| ImportError::Io(path.clone(), x))?;
-            self.lyrics
-                .write_all(block)
-                .map_err(|x| ImportError::Io(path.clone(), x))?;
+            let mut entry = [0u8; 12];
+            entry[..4].copy_from_slice(&self.lyrics_ordinal.to_le_bytes());
+            entry[4..].copy_from_slice(&self.lyrics_at.to_le_bytes());
+            self.lyrics_index.write_all(&entry).map_err(err)?;
+            self.lyrics_index_at += 12;
+            self.lyrics.write_all(block).map_err(err)?;
             self.lyrics_at += block.len() as u64;
             self.lyrics_ordinal += n;
             self.lyrics_blocks += 1;
@@ -1362,51 +1648,90 @@ impl Writer {
         if self.ordinal != ordinal || self.lyrics_ordinal != ordinal {
             return Err(ImportError::Data("blocks out of step".to_owned()));
         }
-        for doc in bucket.docs {
-            self.search
-                .add(&doc)
-                .map_err(|x| ImportError::Search(x.to_string()))?;
+        if index >= self.search_from {
+            for doc in bucket.docs {
+                self.search
+                    .add(&doc)
+                    .map_err(|x| ImportError::Search(x.to_string()))?;
+            }
         }
         merge(stats, &bucket.stats);
         Ok(())
+    }
+
+    /// Makes everything written so far durable, as of `buckets` buckets.
+    fn checkpoint(
+        &mut self,
+        buckets: usize,
+        stats: &ImportStats,
+    ) -> Result<Checkpoint, ImportError> {
+        let path = self.out.clone();
+        let err = |x| ImportError::Io(path.clone(), x);
+        for w in [
+            &mut self.tracks,
+            &mut self.tracks_index,
+            &mut self.lyrics,
+            &mut self.lyrics_index,
+        ] {
+            w.flush().map_err(err)?;
+            w.get_ref().sync_all().map_err(err)?;
+        }
+        self.write_ids(&ids_partial(buckets))?;
+        self.search
+            .commit(&buckets.to_string())
+            .map_err(|x| ImportError::Search(x.to_string()))?;
+        Ok(Checkpoint {
+            buckets,
+            tracks: self.tracks_at,
+            tracks_index: self.tracks_index_at,
+            lyrics: self.lyrics_at,
+            lyrics_index: self.lyrics_index_at,
+            ordinal: self.ordinal,
+            lyrics_ordinal: self.lyrics_ordinal,
+            track_blocks: self.track_blocks,
+            lyrics_blocks: self.lyrics_blocks,
+            stats: stats.clone(),
+        })
+    }
+
+    /// Writes the id map to `name`, whole or not at all.
+    fn write_ids(&self, name: &str) -> Result<(), ImportError> {
+        let path = self.out.join(name);
+        let tmp = self.out.join(format!("{name}.tmp"));
+        let mut f = BufWriter::with_capacity(1 << 20, File::create(&tmp).map_err(io(&tmp))?);
+        for id in &self.ids {
+            f.write_all(&id.to_le_bytes()).map_err(io(&tmp))?;
+        }
+        f.flush().map_err(io(&tmp))?;
+        f.get_ref().sync_all().map_err(io(&tmp))?;
+        drop(f);
+        std::fs::rename(&tmp, &path).map_err(io(&path))?;
+        file::sync_dir(&self.out).map_err(io(&self.out))
     }
 
     fn finish(mut self) -> Result<(u32, u32, u32), ImportError> {
         let path = self.out.clone();
         let err = |x| ImportError::Io(path.clone(), x);
         // Sentinels: the end of the last block.
-        self.tracks_index
-            .write_all(&u64::MAX.to_le_bytes())
-            .map_err(err)?;
-        self.tracks_index
-            .write_all(&self.ordinal.to_le_bytes())
-            .map_err(err)?;
-        self.tracks_index
-            .write_all(&self.tracks_at.to_le_bytes())
-            .map_err(err)?;
-        self.lyrics_index
-            .write_all(&self.lyrics_ordinal.to_le_bytes())
-            .map_err(err)?;
-        self.lyrics_index
-            .write_all(&self.lyrics_at.to_le_bytes())
-            .map_err(err)?;
-        for mut w in [
-            self.tracks,
-            self.tracks_index,
-            self.lyrics,
-            self.lyrics_index,
+        let mut entry = [0u8; 20];
+        entry[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+        entry[8..12].copy_from_slice(&self.ordinal.to_le_bytes());
+        entry[12..].copy_from_slice(&self.tracks_at.to_le_bytes());
+        self.tracks_index.write_all(&entry).map_err(err)?;
+        let mut entry = [0u8; 12];
+        entry[..4].copy_from_slice(&self.lyrics_ordinal.to_le_bytes());
+        entry[4..].copy_from_slice(&self.lyrics_at.to_le_bytes());
+        self.lyrics_index.write_all(&entry).map_err(err)?;
+        for w in [
+            &mut self.tracks,
+            &mut self.tracks_index,
+            &mut self.lyrics,
+            &mut self.lyrics_index,
         ] {
             w.flush().map_err(err)?;
             w.get_ref().sync_all().map_err(err)?;
         }
-        let path = self.out.join(IDS);
-        let mut ids = BufWriter::with_capacity(1 << 20, File::create(&path).map_err(io(&path))?);
-        for id in &self.ids {
-            ids.write_all(&id.to_le_bytes()).map_err(io(&path))?;
-        }
-        ids.flush().map_err(io(&path))?;
-        ids.get_ref().sync_all().map_err(io(&path))?;
-        drop(ids);
+        self.write_ids(IDS)?;
         self.ids = Vec::new();
         tracing::info!("merging the search index");
         self.search
@@ -1456,7 +1781,7 @@ struct Schedule {
 }
 
 impl Schedule {
-    fn new(tmp: &Path, threads: usize, budget: u64, max_bucket: u64) -> Self {
+    fn new(tmp: &Path, threads: usize, budget: u64, max_bucket: u64, start: usize) -> Self {
         let weights = bucket_weights(tmp);
         tracing::info!(
             largest_bucket_mb = weights.iter().copied().max().unwrap_or_default() >> 20,
@@ -1468,8 +1793,8 @@ impl Schedule {
             window: threads * 2,
             budget,
             max_bucket,
-            next: AtomicUsize::new(0),
-            admission: Mutex::new((0, 0)),
+            next: AtomicUsize::new(start),
+            admission: Mutex::new((start, 0)),
             admission_cv: Condvar::new(),
             done: Mutex::new(BTreeMap::new()),
             done_cv: Condvar::new(),
@@ -1547,32 +1872,63 @@ impl Schedule {
 fn pass2(
     tmp: &Path,
     out: &Path,
-    pass1: &Pass1,
+    progress: &mut Progress,
     options: &ImportOptions,
     stop: &AtomicBool,
-    stats: &mut ImportStats,
 ) -> Result<Meta, ImportError> {
     // A bucket larger than its share of the memory is made in parts.
     let max_bucket = (options.memory as u64 / options.threads.max(1) as u64).max(1 << 20);
-    let dicts = train(tmp, options.level, max_bucket)?;
-    let mut writer = Writer::create(out, pass1.max_track_id, options)?;
+    let dicts = if progress.dictionaries {
+        load_dicts(out, options.level)?
+    } else {
+        let dicts = train(tmp, out, options.level, max_bucket)?;
+        progress.dictionaries = true;
+        write_progress(out, progress)?;
+        dicts
+    };
+    let mut stats = progress
+        .checkpoint
+        .as_ref()
+        .map_or_else(|| progress.stats.clone(), |c| c.stats.clone());
+    let start = progress.checkpoint.as_ref().map_or(0, |c| c.buckets);
+    let mut writer = Writer::open(out, progress, options)?;
 
     let threads = options.threads.max(1);
-    let schedule = Schedule::new(tmp, threads, options.memory as u64, max_bucket);
+    let every = options.checkpoint_every.max(1);
+    let schedule = Schedule::new(tmp, threads, options.memory as u64, max_bucket, start);
     std::thread::scope(|scope| -> Result<(), ImportError> {
         for _ in 0..threads {
             scope.spawn(|| schedule.work(tmp, &dicts, stop));
         }
         let mut result = Ok(());
-        for bucket in 0..BUCKETS {
-            if let Err(e) = schedule.take(bucket).and_then(|b| writer.write(b, stats)) {
+        let mut written = Vec::new();
+        for bucket in start..BUCKETS {
+            if let Err(e) = schedule
+                .take(bucket)
+                .and_then(|b| writer.write(b, bucket, &mut stats))
+            {
                 result = Err(e);
                 break;
             }
-            for kind in ["tracks", "lyrics"] {
-                let _ = std::fs::remove_file(bucket_path(tmp, kind, bucket));
-            }
             schedule.written(bucket);
+            written.push(bucket);
+            if (bucket + 1).is_multiple_of(every) && bucket + 1 < BUCKETS {
+                // The buckets' temporary files are removed only once what they became is durable.
+                let saved = writer.checkpoint(bucket + 1, &stats).and_then(|c| {
+                    progress.checkpoint = Some(c);
+                    write_progress(out, progress)
+                });
+                remove_ids_partials(out, Some(bucket + 1));
+                if let Err(e) = saved {
+                    result = Err(e);
+                    break;
+                }
+                for b in written.drain(..) {
+                    for kind in ["tracks", "lyrics"] {
+                        let _ = std::fs::remove_file(bucket_path(tmp, kind, b));
+                    }
+                }
+            }
             if bucket % 64 == 63 {
                 tracing::info!(
                     buckets = bucket + 1,
@@ -1593,9 +1949,9 @@ fn pass2(
         format: FORMAT_VERSION,
         derivations: super::derivations(),
         tracks,
-        max_track_id: pass1.max_track_id,
+        max_track_id: progress.max_track_id,
         track_blocks,
         lyrics_blocks,
-        stats: ImportStats::default(),
+        stats,
     })
 }

@@ -26,8 +26,9 @@ Options (each has an environment variable fallback):
                                                         0: never [24h]
   --min-free-gb GB         LRCLIB_MIRROR_MIN_FREE_GB    free space an import needs to start [60]
   --import-threads N       LRCLIB_MIRROR_IMPORT_THREADS threads importing a dump [the number of CPUs]
-  --import-memory MB       LRCLIB_MIRROR_IMPORT_MEMORY  memory for the rows an import sorts at once, roughly
-                                                        (the search index writer takes 256 MB more) [1024]
+  --import-memory MB       LRCLIB_MIRROR_IMPORT_MEMORY  memory an import may take, roughly (at least 768)
+                                                        [60% of the container's limit or the machine's
+                                                        memory, at most 4096]
   --listing-url URL        LRCLIB_MIRROR_LISTING_URL    the dump listing [LRCLIB's]
   --dump-url URL           LRCLIB_MIRROR_DUMP_URL       where dumps are downloaded from [LRCLIB's]
   -h, --help               this help
@@ -43,7 +44,8 @@ pub struct Config {
     pub update_interval: Option<Duration>,
     pub min_free_bytes: u64,
     pub import_threads: usize,
-    pub import_memory_bytes: usize,
+    /// `None`: from the memory available.
+    pub import_memory_bytes: Option<u64>,
     pub listing_url: String,
     pub dump_url: String,
 }
@@ -85,8 +87,13 @@ impl Config {
             "LRCLIB_MIRROR_IMPORT_THREADS",
             std::thread::available_parallelism().map_or(2, std::num::NonZero::get),
         )?;
-        let import_memory_mb: usize =
-            value(args, "--import-memory", "LRCLIB_MIRROR_IMPORT_MEMORY", 1024)?;
+        let import_memory_mb: Option<u64> = value::<Auto>(
+            args,
+            "--import-memory",
+            "LRCLIB_MIRROR_IMPORT_MEMORY",
+            Auto(None),
+        )?
+        .0;
         if import_threads == 0 {
             return Err(ConfigError::Invalid {
                 name: "--import-threads".to_owned(),
@@ -112,7 +119,7 @@ impl Config {
             update_interval: interval.0,
             min_free_bytes: min_free_gb.saturating_mul(1 << 30),
             import_threads,
-            import_memory_bytes: import_memory_mb.saturating_mul(1 << 20),
+            import_memory_bytes: import_memory_mb.map(|mb| mb.saturating_mul(1 << 20)),
             listing_url,
             dump_url: dump_url.trim_end_matches('/').to_owned(),
         })
@@ -129,6 +136,17 @@ impl Config {
             return Err(ConfigError::Unknown(rest.join(" ")));
         }
         Ok(())
+    }
+}
+
+/// A number, or nothing (the default) when not given.
+struct Auto(Option<u64>);
+
+impl FromStr for Auto {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(|n| Self(Some(n)))
     }
 }
 

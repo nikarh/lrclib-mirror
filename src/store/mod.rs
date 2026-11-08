@@ -6,6 +6,7 @@
 //! | File | |
 //! | --- | --- |
 //! | `meta.json` | format version, counts; written last, so a store without it is incomplete |
+//! | `files.json` | the store's files and their sizes, checked when it is opened |
 //! | `tracks.zst`, `tracks.idx` | track records in blocks of up to [`TRACKS_PER_BLOCK`], zstd-compressed with `tracks.dict`; the index has each block's first sort key, first ordinal and offset |
 //! | `lyrics.zst`, `lyrics.idx` | lyrics in blocks of ~[`LYRICS_BLOCK_BYTES`], zstd-compressed with `lyrics.dict`; the index has each block's first ordinal and offset |
 //! | `ids.bin` | for every track id, the track's ordinal + 1 (0: no such track), u32 little-endian |
@@ -22,17 +23,25 @@
 //! and its lyrics (or that differ only in their metadata). Names normalized for lookups are stored only when they
 //! aren't what the normalization gives today.
 
+pub mod file;
 mod import;
 mod read;
 
-pub use import::{ImportError, ImportOptions, ImportStats, import};
+pub use import::{
+    ImportError, ImportOptions, ImportStats, default_memory, dump_read, finished_store, import,
+    is_import, memory_limit,
+};
 pub use read::{Scratch, Store, StoreError, with_scratch};
+
+use std::path::Path;
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const TRACKS_PER_BLOCK: usize = 128;
 pub const LYRICS_BLOCK_BYTES: usize = 64 << 10;
 
 const META: &str = "meta.json";
+/// The store's files and their sizes, checked when it is opened.
+const FILES: &str = "files.json";
 const TRACKS: &str = "tracks.zst";
 const TRACKS_INDEX: &str = "tracks.idx";
 const TRACKS_DICT: &str = "tracks.dict";
@@ -110,6 +119,35 @@ pub fn derivations() -> u64 {
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
     h
+}
+
+/// The files of a store (search index included) and their sizes, but `meta.json` and `files.json`, sorted.
+fn list_files(dir: &Path) -> std::io::Result<Vec<(String, u64)>> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let meta = entry.metadata()?;
+            if meta.is_dir() {
+                walk(root, &path, out)?;
+                continue;
+            }
+            let name = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            // Tantivy's lock files come and go.
+            if name != META && name != FILES && path.extension().is_none_or(|e| e != "lock") {
+                out.push((name, meta.len()));
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out)?;
+    out.sort();
+    Ok(out)
 }
 
 /// The sort key of a track: its normalized artist and name, hashed.

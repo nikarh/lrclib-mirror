@@ -92,13 +92,20 @@ impl Read for Download {
     }
 }
 
-/// Starts downloading `url`. The body is read from the returned [`Download`] (on a blocking thread).
+/// A dropped connection is resumed (an HTTP range from where it stopped) this many times.
+const RESUMES: u32 = 5;
+
+/// Starts downloading `url`. The body is read from the returned [`Download`] (on a blocking thread). A connection
+/// that drops or stalls is resumed where it stopped, a few times: the reader doesn't see it.
 pub async fn download(client: &reqwest::Client, url: &str) -> Result<Download, DumpError> {
-    let mut response = client.get(url).send().await?.error_for_status()?;
+    let response = client.get(url).send().await?.error_for_status()?;
     let (tx, rx) = mpsc::channel(64);
+    let (client, url) = (client.clone(), url.to_owned());
     tokio::spawn(async move {
+        let mut response = response;
         let mut received = 0u64;
         let mut next_report = PROGRESS_EVERY;
+        let mut resumes = 0;
         loop {
             let chunk = match tokio::time::timeout(STALL_TIMEOUT, response.chunk()).await {
                 Err(_) => Err(std::io::Error::other(DumpError::Stalled)),
@@ -106,16 +113,33 @@ pub async fn download(client: &reqwest::Client, url: &str) -> Result<Download, D
                 Ok(Ok(None)) => return,
                 Ok(Ok(Some(chunk))) => Ok(chunk),
             };
-            if let Ok(chunk) = &chunk {
-                received += chunk.len() as u64;
-                if received >= next_report {
-                    tracing::info!(downloaded_gb = received >> 30, "downloading");
-                    next_report += PROGRESS_EVERY;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(e) if resumes < RESUMES => {
+                    resumes += 1;
+                    tracing::warn!(error = %e, received_mb = received >> 20, resumes, "the download broke; resuming");
+                    tokio::time::sleep(Duration::from_secs(10 * u64::from(resumes))).await;
+                    match resume(&client, &url, received).await {
+                        Ok(r) => response = r,
+                        Err(e) => {
+                            let _ = tx.send(Err(std::io::Error::other(e))).await;
+                            return;
+                        }
+                    }
+                    continue;
                 }
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            };
+            received += chunk.len() as u64;
+            if received >= next_report {
+                tracing::info!(downloaded_gb = received >> 30, "downloading");
+                next_report += PROGRESS_EVERY;
             }
-            let failed = chunk.is_err();
             // The reader is gone: it failed or stopped.
-            if tx.send(chunk).await.is_err() || failed {
+            if tx.send(Ok(chunk)).await.is_err() {
                 return;
             }
         }
@@ -126,9 +150,113 @@ pub async fn download(client: &reqwest::Client, url: &str) -> Result<Download, D
     })
 }
 
-/// A dump, gunzipped (a broken or cut stream fails: gzip's trailer has the length and a CRC).
-pub fn gunzip<R: Read>(input: R) -> impl Read {
-    flate2::read::MultiGzDecoder::new(std::io::BufReader::with_capacity(1 << 20, input))
+/// The rest of `url` from byte `from`; an error when the server doesn't answer with exactly that.
+async fn resume(
+    client: &reqwest::Client,
+    url: &str,
+    from: u64,
+) -> Result<reqwest::Response, String> {
+    let response = client
+        .get(url)
+        .header(reqwest::header::RANGE, format!("bytes={from}-"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let starts_at = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("bytes "))
+        .and_then(|v| v.split('-').next())
+        .and_then(|v| v.parse::<u64>().ok());
+    if response.status() == reqwest::StatusCode::PARTIAL_CONTENT && starts_at == Some(from) {
+        Ok(response)
+    } else {
+        Err(format!(
+            "can't resume the download: the server answered {}",
+            response.status()
+        ))
+    }
+}
+
+/// A dump, gunzipped on a thread of its own (a broken or cut stream fails: gzip's trailer has the length and a CRC).
+pub fn gunzip<R: Read + Send + 'static>(input: R) -> impl Read + Send {
+    read_ahead(flate2::read::MultiGzDecoder::new(
+        std::io::BufReader::with_capacity(1 << 20, input),
+    ))
+}
+
+/// Reads `input` on a thread of its own, a few MB ahead of the reader: the reading (or unpacking) and what is done
+/// with what was read overlap.
+pub fn read_ahead<R: Read + Send + 'static>(mut input: R) -> impl Read + Send {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<Vec<u8>>>(8);
+    std::thread::spawn(move || {
+        loop {
+            let mut chunk = vec![0u8; 1 << 20];
+            let mut filled = 0;
+            let result = loop {
+                match input.read(chunk.get_mut(filled..).unwrap_or_default()) {
+                    Ok(0) => break Ok(()),
+                    Ok(n) => {
+                        filled += n;
+                        if filled == chunk.len() {
+                            break Ok(());
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => break Err(e),
+                }
+            };
+            chunk.truncate(filled);
+            let end = filled == 0;
+            let sent = match result {
+                Ok(()) if end => return,
+                Ok(()) => tx.send(Ok(chunk)),
+                Err(e) => {
+                    let _ = tx.send(Ok(chunk));
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            };
+            // The reader is gone.
+            if sent.is_err() {
+                return;
+            }
+        }
+    });
+    ReadAhead {
+        rx,
+        chunk: Vec::new(),
+        at: 0,
+    }
+}
+
+struct ReadAhead {
+    rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    chunk: Vec<u8>,
+    at: usize,
+}
+
+impl Read for ReadAhead {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.at >= self.chunk.len() {
+            match self.rx.recv() {
+                Ok(Ok(chunk)) => {
+                    self.chunk = chunk;
+                    self.at = 0;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Ok(0),
+            }
+        }
+        let rest = self.chunk.get(self.at..).unwrap_or_default();
+        let n = rest.len().min(buf.len());
+        if let (Some(dst), Some(src)) = (buf.get_mut(..n), rest.get(..n)) {
+            dst.copy_from_slice(src);
+        }
+        self.at += n;
+        Ok(n)
+    }
 }
 
 #[cfg(test)]
@@ -154,10 +282,12 @@ mod tests {
         gz.write_all(&vec![7u8; 100_000]).unwrap();
         let gz = gz.finish().unwrap();
         let mut out = Vec::new();
-        gunzip(&gz[..]).read_to_end(&mut out).unwrap();
+        gunzip(std::io::Cursor::new(gz.clone()))
+            .read_to_end(&mut out)
+            .unwrap();
         assert_eq!(out, vec![7u8; 100_000]);
         assert!(
-            gunzip(&gz[..gz.len() - 4])
+            gunzip(std::io::Cursor::new(gz[..gz.len() - 4].to_vec()))
                 .read_to_end(&mut Vec::new())
                 .is_err()
         );
