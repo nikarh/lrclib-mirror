@@ -143,12 +143,17 @@ Flags, each with an environment variable fallback:
 | --- | --- | --- | --- |
 | `--data-dir` | `LRCLIB_MIRROR_DATA_DIR` | `/data` | Stores (`stores/`) and dumps to import (`dumps/`) |
 | `--listen` | `LRCLIB_MIRROR_LISTEN` | `0.0.0.0:3300` | HTTP address |
-| `--update-interval` | `LRCLIB_MIRROR_UPDATE_INTERVAL` | `24h` | How often to look for a newer dump (`30m`, `7d`); `0`: never |
+| `--update-schedule` | `LRCLIB_MIRROR_UPDATE_SCHEDULE` | `34 2 * * *` | When to look for a newer dump, besides at start: a cron expression (`minute hour day month weekday`, e.g. `0 */6 * * *`, `30 4 * * mon`, or `@daily`) in the time zone of `TZ` (see below); `off`: never. The default is every day at 02:34; after a failed check the next one comes within an hour |
 | `--min-free-gb` | `LRCLIB_MIRROR_MIN_FREE_GB` | `60` | Free space an import needs to start (what an interrupted import of the same dump has counts as free) |
 | `--import-threads` | `LRCLIB_MIRROR_IMPORT_THREADS` | the CPUs (of the container's quota) | Threads importing a dump |
 | `--import-memory` | `LRCLIB_MIRROR_IMPORT_MEMORY` | 60% of the container's limit or the machine's memory, 768 to 4096 | MB an import may take, roughly (at least 768) |
 | `--listing-url` | `LRCLIB_MIRROR_LISTING_URL` | LRCLIB's | The dump listing |
 | `--dump-url` | `LRCLIB_MIRROR_DUMP_URL` | LRCLIB's | Where dumps are downloaded from |
+
+`TZ` sets the time zone of the schedule, as an IANA name (`TZ=Europe/Riga`); without it, the system's time zone
+(UTC in the container image). The time zone database is built in, so the `FROM scratch` image needs no files for it.
+`--update-interval` was replaced by `--update-schedule`: a start with `--update-interval` or
+`LRCLIB_MIRROR_UPDATE_INTERVAL` set fails, rather than ignore it.
 
 `RUST_LOG` sets the log filter (default `info,tantivy=warn`).
 
@@ -168,7 +173,7 @@ searches by words and by fields, and requests that must fail. Then it times both
 
 ```sh
 lrclib serve -d lrclib-db-dump-<date>.sqlite3 -p 3397        # LRCLIB's server (github.com/tranxuanthang/lrclib)
-lrclib-mirror --data-dir data --update-interval 0              # with the same dump in data/dumps/
+lrclib-mirror --data-dir data --update-schedule off           # with the same dump in data/dumps/
 mise run compare -- --old http://127.0.0.1:3397 --new http://127.0.0.1:3300 --store data/stores/lrclib-db-dump-<date>
 ```
 

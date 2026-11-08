@@ -8,10 +8,9 @@ mod common;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 use common::{build_db, tmp};
-use lrclib_mirror::config::Config;
+use lrclib_mirror::config::{Config, Schedule};
 use lrclib_mirror::mirror::{Mirror, MirrorError};
 use lrclib_mirror::store::{ImportOptions, import};
 
@@ -23,8 +22,8 @@ fn config(data: &Path) -> Config {
     Config {
         data_dir: data.to_owned(),
         listen: "127.0.0.1:0".parse().unwrap(),
-        // Nothing is downloaded: the listing is never asked for.
-        update_interval: Some(Duration::from_hours(1000)),
+        // Nothing is downloaded: the listing is never asked for (updates are not run).
+        update_schedule: Some(Schedule::default()),
         min_free_bytes: 0,
         import_threads: 2,
         import_memory_bytes: None,
