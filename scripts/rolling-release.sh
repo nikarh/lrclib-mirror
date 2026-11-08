@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Points the rolling release TAG (latest or dev) at $GITHUB_SHA, creating the tag and the release when missing, with
+# Points the rolling release TAG (v2 or v2-dev) at $GITHUB_SHA, creating the tag and the release when missing, with
 # notes naming the upstream commit of the web search the build contains. FLAG: --latest (GitHub's latest release) or --prerelease.
 # Usage: rolling-release.sh TAG TITLE FLAG; needs GH_TOKEN and GH_REPO (the bot's token: Publish then uploads).
 set -euo pipefail
@@ -14,7 +14,7 @@ Built from \`${GITHUB_REF_NAME:-main}\` at ${GITHUB_SHA:0:7}, rebuilt on every c
 
 - [lrclib-homepage](https://github.com/tranxuanthang/lrclib-homepage/commit/$homepage) \`${homepage:0:7}\`
 
-Image: \`ghcr.io/nikarh/lrclib-mirror:$([[ $tag == latest ]] && echo main || echo "$tag")\`. Verify the files with
+Image: \`ghcr.io/nikarh/lrclib-mirror:$tag\`. Verify the files with
 \`SHA256SUMS.asc\` (see the README).
 NOTES
 

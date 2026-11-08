@@ -37,8 +37,8 @@ $lock_changed && summary+=("Cargo.lock")
 {
   joined=$(printf '%s, ' "${summary[@]}")
   echo "build(deps): update upstream (${joined%, })"
-  echo "Upstream changes since the last update. Merging publishes them as \`latest\` and the \`main\` image;"
-  echo "until then this branch is built as the \`dev\` pre-release and the \`dev\` image."
+  echo "Upstream changes since the last update. Merging publishes them as \`v2\` and the \`v2\` image;"
+  echo "until then this branch is built as the \`v2-dev\` pre-release and the \`v2-dev\` image."
   for name in "${changed[@]}"; do
     repo=https://github.com/tranxuanthang/$name
     range="${old[$name]}..${new[$name]}"
