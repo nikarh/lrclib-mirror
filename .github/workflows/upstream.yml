@@ -1,7 +1,7 @@
 name: Upstream
 
-# Daily: moves the upstream submodules (lrclib, lrclib-homepage) to their newest commits and opens a pull request
-# with what changed upstream, or updates the one still open. Its branch is built as the `dev` pre-release and image
+# Daily: moves the web search submodule (lrclib-homepage) to its newest commit, refreshes Cargo.lock, and opens a pull
+# request with what changed, or updates the one still open. Its branch is built as the `dev` pre-release and image
 # (Dev workflow). Merged, the next update opens a new pull request; when upstream has nothing new, nothing happens.
 on:
   schedule:

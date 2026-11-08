@@ -1,15 +1,17 @@
 # Releasing
 
-There are no versions: the builds follow upstream.
+There are no versions: the builds follow the web search's upstream and the dependencies.
 
-- **Latest** (every push to `main`): the `latest` tag moves to the new commit, the `latest` release (GitHub's latest)
-  gets the build's files, and the image is pushed as `main` and `sha-<commit>`.
-- **Upstream** (daily, 04:17 UTC, or by hand): moves the submodules to the newest upstream commits and runs
+- **Latest** (every push to `main`): the `v2` tag moves to the new commit, the `v2` release (GitHub's latest) gets
+  the build's files, and the image is pushed as `v2` and `v2-sha-<commit>`. (The `latest` and `dev` releases and the
+  `main`, `sha-<commit>` and `dev` images are the previous version's, built from the `legacy-sqlite` branch, and no
+  longer updated: setups that follow them don't switch to this version unasked.)
+- **Upstream** (daily, 04:17 UTC, or by hand): moves the web search submodule to the newest upstream commit and runs
   `cargo update`. When anything changed, it force-pushes the `upstream-update` branch (one commit on top of `main`)
   and opens a pull request, or updates the open one, listing the upstream commits, upstream changelog additions, the
   `Cargo.lock` changes and whether `patches/` still apply. Once merged, the branch is deleted and the next change
   opens a new pull request.
-- **Dev** (every push to `upstream-update`): the `dev` pre-release and the `dev` image, to try an update before
+- **Dev** (every push to `upstream-update`): the `v2-dev` pre-release and the `v2-dev` image, to try an update before
   merging it.
 - **Publish** (called by Latest and Dev): builds the static x86_64 binary (musl, web search embedded), wraps it in the
   `FROM scratch` image, checks the image runs read-only without capabilities, pushes it to `ghcr.io/nikarh/lrclib-mirror`,
@@ -18,7 +20,7 @@ There are no versions: the builds follow upstream.
 | Asset | Contents |
 | --- | --- |
 | `lrclib-mirror-x86_64-unknown-linux-musl` | The static binary |
-| `LICENSE-lrclib`, `LICENSE-lrclib-homepage` | The upstream projects' MIT licenses, which apply to the code built in |
+| `LICENSE-lrclib`, `LICENSE-lrclib-homepage` | The MIT licenses of LRCLIB's server (code ported to this crate) and web search (built in) |
 | `SHA256SUMS`, `SHA256SUMS.asc` | Checksums of the files and their detached GPG signature |
 
 Dependabot's pull requests (actions, Docker base images) are merged by **Auto-merge** once every required check is

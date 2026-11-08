@@ -5,7 +5,7 @@ git-cliff = "2.14.2"
 cargo-deny = "0.20.2"
 
 [tasks.patch]
-description = "Apply patches/ to the upstream submodules (skips the ones already applied)"
+description = "Apply patches/ to the web search submodule (skips the ones already applied)"
 run = "scripts/patch-upstream.sh"
 
 [tasks."web:install"]
@@ -24,7 +24,6 @@ run = "npm run build"
 
 [tasks.dev]
 description = "Run the server on ./dev-data (updates off: put a dump in dev-data/dumps)"
-depends = ["patch"]
 run = "cargo run -- --data-dir dev-data --listen 127.0.0.1:3300 --update-interval 0"
 
 [tasks.fmt]
@@ -33,20 +32,22 @@ run = "cargo fmt"
 
 [tasks.lint]
 description = "rustfmt check and clippy"
-depends = ["patch"]
-run = ["cargo fmt --check", "cargo clippy --locked --all-targets"]
+run = ["cargo fmt --all --check", "cargo clippy --locked --workspace --all-targets"]
 
 [tasks.test]
 description = "Run the tests"
-depends = ["patch"]
-run = "cargo test --locked"
+run = "cargo test --locked --workspace"
+
+[tasks.compare]
+description = "Compare with LRCLIB's server on the same dump: same answers, and timings (see tools/compare)"
+run = "cargo run --locked --release -p lrclib-compare --"
 
 [tasks.deny]
 description = "Audit dependencies: advisories, licenses, duplicates, sources"
 run = "cargo deny check"
 
 [tasks.ci]
-description = "What CI's check job runs: lint, tests, that the patches apply, that the frontend builds, action pins"
+description = "What CI's check job runs: lint, tests, that the patch applies, that the frontend builds, action pins"
 depends = ["lint", "test", "web:build"]
 run = ["scripts/patch-upstream.sh --check", "scripts/check-actions.sh"]
 
@@ -57,7 +58,7 @@ depends = ["ci", "deny"]
 [tasks.build]
 description = "Release build of the binary with the frontend embedded"
 depends = ["web:build"]
-run = "cargo build --locked --release"
+run = "cargo build --locked --release -p lrclib-mirror"
 
 [tasks.docker]
 description = "Build the container image as lrclib-mirror:dev"

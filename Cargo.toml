@@ -1,6 +1,6 @@
 [package]
 name = "lrclib-mirror"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.99"
 description = "A self-hosted LRCLIB: the LRCLIB server and web search on a local copy of LRCLIB's public database dump, kept up to date"
@@ -12,27 +12,34 @@ keywords = ["lrclib", "lyrics", "lrc", "mirror"]
 categories = ["web-programming::http-server"]
 
 [workspace]
-# The upstream projects are submodules with workspaces of their own.
+members = ["tools/compare"]
+# The web search is a submodule (a node project).
 exclude = ["upstream"]
 
 [dependencies]
+aho-corasick = "1.1.5"
 arc-swap = "1.9.4"
 axum = "0.7"
 bytes = "1.12.1"
-flate2 = "1.1.11"
+collapse = "0.1.2"
+flate2 = { version = "1.1.11", features = ["zlib-rs"] }
+mimalloc = "0.1.52"
 pico-args = "0.5.0"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-rusqlite = "0.31"
+regex = "1.13.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustix = { version = "1", features = ["fs"] }
+secular = { version = "1.0.1", features = ["bmp", "normalization"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-server = { path = "upstream/lrclib/server" }
+serde_yaml = "0.9"
+tantivy = "0.26"
 thiserror = "2.0.21"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util"] }
 tokio-util = "0.7.20"
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+zstd = "0.13"
 
 [lints.rust]
 unsafe_code = "deny"
@@ -67,3 +74,6 @@ debug = false
 [profile.release]
 strip = true
 panic = "abort"
+
+[dev-dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }

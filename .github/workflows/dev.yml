@@ -1,7 +1,7 @@
 name: Dev
 
 # Builds the pending upstream update (the `upstream-update` branch of the Upstream workflow's pull request) as the
-# `dev` pre-release and the `dev` image, so it can be tried before merging.
+# `v2-dev` pre-release and the `v2-dev` image, so it can be tried before merging.
 on:
   push:
     branches:
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   tag:
-    name: Move the dev tag
+    name: Move the v2-dev tag
     if: github.repository_owner == 'nikarh'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -34,7 +34,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
-        run: scripts/rolling-release.sh dev "Dev (${GITHUB_SHA:0:7}, pending upstream update)" --prerelease
+        run: scripts/rolling-release.sh v2-dev "v2 dev (${GITHUB_SHA:0:7}, pending upstream update)" --prerelease
 
   publish:
     name: Publish
@@ -44,5 +44,5 @@ jobs:
       packages: write
     uses: ./.github/workflows/publish.yml
     with:
-      tag: dev
+      tag: v2-dev
     secrets: inherit

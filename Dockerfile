@@ -16,20 +16,16 @@ RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund && npm run 
 FROM rust:1.99.1-alpine AS build
 RUN apk add --no-cache musl-dev gcc git bash ca-certificates
 WORKDIR /src
-COPY scripts/patch-upstream.sh scripts/
-COPY patches/lrclib patches/lrclib
-COPY upstream/lrclib upstream/lrclib
-RUN scripts/patch-upstream.sh
 COPY Cargo.toml Cargo.lock build.rs ./
-COPY .cargo .cargo
 COPY src src
+COPY tools tools
 COPY --from=web /src/upstream/lrclib-homepage/dist upstream/lrclib-homepage/dist
-# The build context has no git metadata: the upstream commits for --version.
-ARG LRCLIB_COMMIT="" LRCLIB_HOMEPAGE_COMMIT="" LRCLIB_MIRROR_VERSION_SUFFIX=""
+# The build context has no git metadata: the web search's upstream commit for --version.
+ARG LRCLIB_HOMEPAGE_COMMIT="" LRCLIB_MIRROR_VERSION_SUFFIX=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     set -eux; \
-    cargo build --locked --release; \
+    cargo build --locked --release -p lrclib-mirror; \
     mkdir -p /rootfs/etc/ssl/certs; \
     cp target/release/lrclib-mirror /rootfs/lrclib-mirror; \
     cp /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/; \

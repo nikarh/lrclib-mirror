@@ -2,13 +2,14 @@ name: Publish
 
 # Builds the static binary once, then pushes the container image to ghcr.io and signs and uploads the release files.
 # There are no versions, only two rolling releases, each with an image:
-# - `latest`: main (images `main` and `sha-<commit>`), from the Latest workflow
-# - `dev`: the pending upstream update (image `dev`), from the Dev workflow
+# - `v2`: main (images `v2` and `v2-sha-<commit>`), from the Latest workflow
+# - `v2-dev`: the pending upstream update (image `v2-dev`), from the Dev workflow
+# (`latest`, `dev` and the images `main`, `sha-<commit>`, `dev` are the previous version's, no longer updated.)
 on:
   workflow_call:
     inputs:
       tag:
-        description: The release, latest or dev
+        description: The release, v2 or v2-dev
         type: string
         required: true
 
@@ -53,24 +54,24 @@ jobs:
       - name: Build the static binary with the web search embedded
         run: |
           set -euo pipefail
-          # --version: e.g. 0.1.0-dev+abc1234 (lrclib e1d863a, lrclib-homepage f37c070)
-          export LRCLIB_MIRROR_VERSION_SUFFIX="-$TAG+${GITHUB_SHA:0:7}"
+          # --version: e.g. 2.0.0+abc1234 (v2), 2.0.0-dev+abc1234 (v2-dev); then the web search's commit
+          export LRCLIB_MIRROR_VERSION_SUFFIX="${TAG#v2}+${GITHUB_SHA:0:7}"
           mise run web:build
-          cargo build --locked --release --target "$TARGET"
+          cargo build --locked --release --target "$TARGET" -p lrclib-mirror
           bin="target/$TARGET/release/lrclib-mirror"
           "$bin" --version
 
           mkdir -p out
           cp "$bin" "out/lrclib-mirror-$TARGET"
-          # The upstream projects' MIT notices travel with their code.
-          cp upstream/lrclib/LICENSE out/LICENSE-lrclib
+          # The MIT notices of the upstream code: the web search, and the server code ported to this crate.
+          cp licenses/LICENSE-lrclib out/LICENSE-lrclib
           cp upstream/lrclib-homepage/LICENSE out/LICENSE-lrclib-homepage
 
           root=ci-rootfs
           mkdir -p "$root/etc/ssl/certs"
           install -m 755 "$bin" "$root/lrclib-mirror"
           cp /etc/ssl/certs/ca-certificates.crt "$root/etc/ssl/certs/"
-          # A new named volume copies this mode, so any uid can write the dumps.
+          # A new named volume copies this mode, so any uid can write the stores.
           mkdir -m 1777 "$root/data"
       - name: Build the image
         run: |
@@ -94,8 +95,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ $TAG == latest ]]; then
-            tags=(main "sha-$(git rev-parse HEAD)")
+          if [[ $TAG == v2 ]]; then
+            tags=(v2 "v2-sha-$(git rev-parse HEAD)")
           else
             tags=("$TAG")
           fi

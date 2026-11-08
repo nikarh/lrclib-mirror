@@ -1,4 +1,4 @@
-//! HTTP: the read-only part of the LRCLIB API, served from the current dump, and the embedded web search.
+//! HTTP: LRCLIB's lookup API, answered from the current store, and the embedded web search.
 
 use std::sync::Arc;
 
@@ -7,10 +7,11 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use server::routes::{get_lyrics_by_metadata, get_lyrics_by_track_id, search_lyrics};
 use tower_http::cors::{Any, CorsLayer};
 
+use crate::api::{self, ApiError};
 use crate::mirror::Mirror;
+use crate::store::Store;
 
 mod assets {
     include!(concat!(env!("OUT_DIR"), "/assets.rs"));
@@ -38,7 +39,7 @@ pub fn router(mirror: Arc<Mirror>) -> Router {
         .with_state(mirror)
 }
 
-/// While the first dump downloads there is nothing to answer from.
+/// While the first dump is imported there is nothing to answer from.
 fn unavailable() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -46,43 +47,43 @@ fn unavailable() -> Response {
         axum::Json(serde_json::json!({
             "statusCode": 503,
             "name": "NoDatabase",
-            "message": "The first database dump is still downloading",
+            "message": "The first database dump is still being imported",
         })),
     )
         .into_response()
 }
 
-async fn get_by_metadata(
-    State(mirror): State<Arc<Mirror>>,
-    query: Query<get_lyrics_by_metadata::QueryParams>,
-) -> Response {
-    match mirror.current() {
-        Some(db) => get_lyrics_by_metadata::route(query, State(Arc::clone(&db.state)))
-            .await
-            .into_response(),
-        None => unavailable(),
+/// Answers from the current store, on a blocking thread (reads are file reads).
+async fn answer<F>(mirror: &Mirror, f: F) -> Response
+where
+    F: FnOnce(&Store) -> Result<api::JsonBody, ApiError> + Send + 'static,
+{
+    let Some(store) = mirror.current() else {
+        return unavailable();
+    };
+    match tokio::task::spawn_blocking(move || f(&store)).await {
+        Ok(Ok(body)) => body.into_response(),
+        Ok(Err(e)) => e.into_response(),
+        Err(e) => ApiError::Unknown(e.to_string()).into_response(),
     }
 }
 
-async fn get_by_track_id(State(mirror): State<Arc<Mirror>>, id: Path<i64>) -> Response {
-    match mirror.current() {
-        Some(db) => get_lyrics_by_track_id::route(id, State(Arc::clone(&db.state)))
-            .await
-            .into_response(),
-        None => unavailable(),
-    }
+async fn get_by_metadata(
+    State(mirror): State<Arc<Mirror>>,
+    Query(params): Query<api::GetParams>,
+) -> Response {
+    answer(&mirror, move |store| api::get_by_metadata(store, &params)).await
+}
+
+async fn get_by_track_id(State(mirror): State<Arc<Mirror>>, Path(id): Path<i64>) -> Response {
+    answer(&mirror, move |store| api::get_by_id(store, id)).await
 }
 
 async fn search(
     State(mirror): State<Arc<Mirror>>,
-    query: Query<search_lyrics::QueryParams>,
+    Query(params): Query<api::SearchParams>,
 ) -> Response {
-    match mirror.current() {
-        Some(db) => search_lyrics::route(query, State(Arc::clone(&db.state)))
-            .await
-            .into_response(),
-        None => unavailable(),
-    }
+    answer(&mirror, move |store| api::search(store, &params)).await
 }
 
 /// The web search (a single page app: unknown paths get `index.html`).

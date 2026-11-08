@@ -11,16 +11,10 @@ version = 2
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-# Each of these comes with the upstream `server` crate (upstream/lrclib), which pins the dependents. Drop an entry once
-# upstream has moved on.
 ignore = [
-  # idna 0.5 via validator 0.18. validator only uses idna for its `email` and `url` checks; the server's request
-  # structs use `length` and `range` only.
-  { id = "RUSTSEC-2024-0421", reason = "idna via validator, whose email/url checks the server doesn't use" },
-  # proc-macro-error via validator_derive 0.18: unmaintained, compile time only.
-  { id = "RUSTSEC-2024-0370", reason = "unmaintained proc macro helper of validator_derive (build time only)" },
-  # unsafe-libyaml via serde_yaml (the server's Lyricsfile support): unmaintained, not a known vulnerability.
-  { id = "RUSTSEC-2024-0449", reason = "unmaintained, used by upstream's serde_yaml" },
+  # unsafe-libyaml via serde_yaml: unmaintained, not a known vulnerability. serde_yaml writes Lyricsfiles exactly as
+  # LRCLIB's server does (it uses the same version); only serialization of known structures is used, no YAML parsing.
+  { id = "RUSTSEC-2024-0449", reason = "unmaintained; serde_yaml reproduces LRCLIB's Lyricsfiles byte for byte" },
 ]
 
 [licenses]
@@ -29,7 +23,6 @@ confidence-threshold = 0.93
 allow = [
   "MIT",
   "Apache-2.0",
-  "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
   "Unicode-3.0",
@@ -38,15 +31,9 @@ allow = [
   "CDLA-Permissive-2.0",
 ]
 
-# The upstream server crate has no license field; the upstream repository is MIT licensed (upstream/lrclib/LICENSE).
-[[licenses.clarify]]
-crate = "server"
-expression = "MIT"
-license-files = []
-
 [bans]
-# The dependency tree is mostly upstream's (axum 0.7, rand 0.8, tantivy, ...), and the daily upstream update must not
-# fail on duplicates that only upstream can resolve: reported, not denied.
+# Duplicates come from dependencies' own trees (tantivy, axum 0.7, ...), and the daily Cargo.lock update must not fail
+# on duplicates only they can resolve: reported, not denied.
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "simplest-path"

@@ -1,6 +1,6 @@
 //! Embeds the built frontend (`upstream/lrclib-homepage/dist`) into the binary and sets `LRCLIB_MIRROR_VERSION`:
-//! the package version, `LRCLIB_MIRROR_VERSION_SUFFIX` (e.g. `-dev+abc1234` for CI builds) and the commits of the
-//! upstream projects. Without a built frontend the binary still builds and serves a placeholder page, so the backend
+//! the package version, `LRCLIB_MIRROR_VERSION_SUFFIX` (e.g. `-dev+abc1234` for CI builds) and the commit of the
+//! web search. Without a built frontend the binary still builds and serves a placeholder page, so the backend
 //! can be developed without node.
 
 use std::fmt::Write as _;
@@ -13,10 +13,9 @@ fn main() {
     println!("cargo::rerun-if-env-changed=LRCLIB_MIRROR_VERSION_SUFFIX");
     let suffix = std::env::var("LRCLIB_MIRROR_VERSION_SUFFIX").unwrap_or_default();
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
-    let lrclib = upstream_commit(&root, "lrclib", "LRCLIB_COMMIT");
     let homepage = upstream_commit(&root, "lrclib-homepage", "LRCLIB_HOMEPAGE_COMMIT");
     println!(
-        "cargo::rustc-env=LRCLIB_MIRROR_VERSION={version}{suffix} (lrclib {lrclib}, lrclib-homepage {homepage})"
+        "cargo::rustc-env=LRCLIB_MIRROR_VERSION={version}{suffix} (lrclib-homepage {homepage})"
     );
 
     let dist = root.join("upstream").join("lrclib-homepage").join("dist");
