@@ -330,7 +330,7 @@ fn imports_and_answers_like_lrclib() {
         threads: 3,
         level: 3,
         index_memory: 64 << 20,
-        memory: 16 << 20,
+        memory: 3 << 20,
     };
     let input = std::fs::File::open(&db).unwrap();
     let stats = import(input, &out, &options, &AtomicBool::new(false)).unwrap();
@@ -347,6 +347,8 @@ fn imports_and_answers_like_lrclib() {
     );
     assert!(stats.lower_exceptions > 0, "{stats:?}");
     assert_eq!(stats.broken_tracks, 1, "{stats:?}");
+    // The prolific artist's bucket is larger than its share of the memory.
+    assert!(stats.split_buckets > 0, "{stats:?}");
 
     let store = Store::open(&out).unwrap();
     let ids: Vec<i64> = conn

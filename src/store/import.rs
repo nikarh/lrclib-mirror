@@ -71,7 +71,9 @@ impl Default for ImportOptions {
     }
 }
 
+/// What an import found and did (informational: missing fields read as 0).
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ImportStats {
     pub pages: u64,
     pub tracks: u64,
@@ -87,6 +89,8 @@ pub struct ImportStats {
     pub lyricsfile_text: u64,
     pub lower_exceptions: u64,
     pub broken_tracks: u64,
+    /// Buckets too large for the memory, made in parts.
+    pub split_buckets: u64,
     pub max_early_pages: usize,
     pub seconds_pass1: u64,
     pub seconds_pass2: u64,
@@ -163,6 +167,17 @@ pub fn import<R: Read>(
         serde_json::to_vec_pretty(&meta).map_err(|e| ImportError::Io(path.clone(), e.into()))?;
     write_synced(&path, &json)?;
     Ok(stats)
+}
+
+/// The memory of the process (anonymous: without the files it maps), for the progress log; 0 where unknown.
+fn rss_mb() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            let line = s.lines().find(|l| l.starts_with("RssAnon:"))?;
+            line.split_whitespace().nth(1)?.parse::<u64>().ok()
+        })
+        .map_or(0, |kb| kb >> 10)
 }
 
 fn write_synced(path: &Path, data: &[u8]) -> Result<(), ImportError> {
@@ -482,6 +497,7 @@ fn pass1<R: Read>(
                 rows,
                 tracks = stats.tracks,
                 lyrics = stats.lyrics_rows,
+                rss_mb = rss_mb(),
                 "reading the dump"
             );
         }
@@ -937,6 +953,7 @@ fn encode_track(t: &TrackRow, broken: bool, out: &mut Vec<u8>, stats: &mut Impor
 }
 
 /// A bucket made into store blocks.
+#[derive(Default)]
 struct BucketOut {
     /// (first sort key, tracks, compressed)
     track_blocks: Vec<(u64, u32, Vec<u8>)>,
@@ -947,33 +964,171 @@ struct BucketOut {
     stats: ImportStats,
 }
 
-/// The raw (uncompressed) blocks of a bucket.
-struct RawBucket {
-    track_blocks: Vec<(u64, u32, Vec<u8>)>,
-    lyrics_blocks: Vec<(u32, Vec<u8>)>,
-    ids: Vec<u32>,
-    docs: Vec<search::Doc>,
-    stats: ImportStats,
+/// What becomes of a bucket's blocks.
+enum Blocks<'d> {
+    /// Compressed into the store.
+    Store {
+        tracks: zstd::bulk::Compressor<'d>,
+        lyrics: zstd::bulk::Compressor<'d>,
+    },
+    /// Samples to train the dictionaries with: one 8 KB piece of every `every` lyrics block, and every track block.
+    Samples {
+        every: usize,
+        seen: usize,
+        tracks: &'d mut Vec<Vec<u8>>,
+        lyrics: &'d mut Vec<Vec<u8>>,
+    },
 }
 
-fn build_bucket(tmp: &Path, bucket: usize) -> Result<RawBucket, ImportError> {
+/// Makes a bucket's tracks, in order, into blocks; each block is compressed (or sampled) once it is full, so a
+/// bucket's raw blocks are never all in memory.
+struct BlockMaker<'d> {
+    blocks: Blocks<'d>,
+    out: BucketOut,
+    track_keys: Vec<u64>,
+    track_block: Vec<u8>,
+    lyrics_block: Vec<u8>,
+    lyrics_entries: u32,
+}
+
+impl<'d> BlockMaker<'d> {
+    fn new(blocks: Blocks<'d>) -> Self {
+        Self {
+            blocks,
+            out: BucketOut::default(),
+            track_keys: Vec::with_capacity(TRACKS_PER_BLOCK),
+            track_block: Vec::new(),
+            lyrics_block: Vec::with_capacity(LYRICS_BLOCK_BYTES * 2),
+            lyrics_entries: 0,
+        }
+    }
+
+    /// Adds a track and its temporary lyrics entry (`None`: no lyrics).
+    fn add(&mut self, key: u64, track: &TrackRow, entry: Option<&[u8]>) -> Result<(), ImportError> {
+        let (entry, lyrics_broken) = if let Some(entry) = entry {
+            finish_entry(entry, track, &mut self.out.stats)
+                .ok_or_else(|| ImportError::Data("corrupt temporary file".to_owned()))?
+        } else {
+            if track.last_lyrics_id.is_some() {
+                self.out.stats.lyrics_missing += 1;
+            }
+            (vec![0u8], false)
+        };
+        put_bytes(&mut self.lyrics_block, &entry);
+        self.lyrics_entries += 1;
+        if self.lyrics_block.len() >= LYRICS_BLOCK_BYTES {
+            self.flush_lyrics()?;
+        }
+        encode_track(
+            track,
+            lyrics_broken,
+            &mut self.track_block,
+            &mut self.out.stats,
+        );
+        self.track_keys.push(key);
+        if self.track_keys.len() == TRACKS_PER_BLOCK {
+            self.flush_tracks()?;
+        }
+        self.out.ids.push(track.id);
+        self.out.docs.push(search::Doc {
+            track_id: i64::from(track.id),
+            name_lower: track.name_lower.clone(),
+            artist_lower: track.artist_lower.clone(),
+            album_lower: track.album_lower.clone(),
+        });
+        Ok(())
+    }
+
+    fn flush_lyrics(&mut self) -> Result<(), ImportError> {
+        if self.lyrics_entries == 0 {
+            return Ok(());
+        }
+        let n = std::mem::take(&mut self.lyrics_entries);
+        match &mut self.blocks {
+            Blocks::Store { lyrics, .. } => {
+                let compressed = lyrics
+                    .compress(&self.lyrics_block)
+                    .map_err(ImportError::Compress)?;
+                self.out.lyrics_blocks.push((n, compressed));
+            }
+            Blocks::Samples {
+                every,
+                seen,
+                lyrics,
+                ..
+            } => {
+                if (*seen).is_multiple_of(*every) {
+                    let end = self.lyrics_block.len().min(8 << 10);
+                    lyrics.push(self.lyrics_block.get(..end).unwrap_or_default().to_vec());
+                }
+                *seen += 1;
+            }
+        }
+        self.lyrics_block.clear();
+        Ok(())
+    }
+
+    /// `[count][sort keys, u64 LE each][records]`
+    fn flush_tracks(&mut self) -> Result<(), ImportError> {
+        if self.track_keys.is_empty() {
+            return Ok(());
+        }
+        let mut raw = Vec::with_capacity(4 + self.track_keys.len() * 8 + self.track_block.len());
+        put_varint(&mut raw, self.track_keys.len() as u64);
+        for k in &self.track_keys {
+            raw.extend_from_slice(&k.to_le_bytes());
+        }
+        raw.extend_from_slice(&self.track_block);
+        let first = self.track_keys.first().copied().unwrap_or_default();
+        #[allow(clippy::cast_possible_truncation)] // TRACKS_PER_BLOCK
+        let n = self.track_keys.len() as u32;
+        match &mut self.blocks {
+            Blocks::Store { tracks, .. } => {
+                let compressed = tracks.compress(&raw).map_err(ImportError::Compress)?;
+                self.out.track_blocks.push((first, n, compressed));
+            }
+            Blocks::Samples { tracks, .. } => tracks.push(raw),
+        }
+        self.track_keys.clear();
+        self.track_block.clear();
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<BucketOut, ImportError> {
+        self.flush_lyrics()?;
+        self.flush_tracks()?;
+        Ok(self.out)
+    }
+}
+
+/// Reads temporary lyrics entries into a map by lyrics id.
+fn read_lyrics(path: &Path, into: &mut HashMap<u32, Vec<u8>>) -> Result<(), ImportError> {
+    read_bucket(path, |record| {
+        let mut r = Reader::new(record);
+        let id = r
+            .varint()
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| ImportError::Data("corrupt temporary file".to_owned()))?;
+        into.insert(id, record.get(r.at..).unwrap_or_default().to_vec());
+        Ok(())
+    })
+}
+
+/// Makes bucket `bucket` into blocks. Its lyrics are held in memory to be joined with the tracks; when they would take
+/// more than `max_memory`, the bucket (an artist with very many tracks) is split by sort key into parts, its lyrics
+/// spread over a temporary file per part, and the parts are made one after the other.
+fn build_bucket(
+    tmp: &Path,
+    bucket: usize,
+    blocks: Blocks<'_>,
+    max_memory: u64,
+) -> Result<BucketOut, ImportError> {
     let corrupt = || ImportError::Data("corrupt temporary file".to_owned());
     let mut tracks = Vec::new();
     read_bucket(&bucket_path(tmp, "tracks", bucket), |record| {
         tracks.push(decode_track_row(record).ok_or_else(corrupt)?);
         Ok(())
     })?;
-    let mut lyrics: HashMap<u32, Vec<u8>> = HashMap::new();
-    read_bucket(&bucket_path(tmp, "lyrics", bucket), |record| {
-        let mut r = Reader::new(record);
-        let id = r
-            .varint()
-            .and_then(|v| u32::try_from(v).ok())
-            .ok_or_else(corrupt)?;
-        lyrics.insert(id, record.get(r.at..).unwrap_or_default().to_vec());
-        Ok(())
-    })?;
-
     let mut keyed: Vec<(u64, TrackRow)> = tracks
         .into_iter()
         .map(|t| {
@@ -985,80 +1140,73 @@ fn build_bucket(tmp: &Path, bucket: usize) -> Result<RawBucket, ImportError> {
         .collect();
     keyed.sort_unstable_by_key(|(key, t)| (*key, t.id));
 
-    let mut stats = ImportStats::default();
-    let mut out = RawBucket {
-        track_blocks: Vec::new(),
-        lyrics_blocks: Vec::new(),
-        ids: Vec::with_capacity(keyed.len()),
-        docs: Vec::with_capacity(keyed.len()),
-        stats: ImportStats::default(),
-    };
-    let mut track_block = Vec::new();
-    let mut track_keys: Vec<u64> = Vec::new();
-    let mut lyrics_block = Vec::new();
-    let mut lyrics_entries = 0u32;
-    let empty_entry = [0u8];
-    for (key, track) in &keyed {
-        let entry = track.last_lyrics_id.and_then(|id| lyrics.get(&id));
-        let (entry, lyrics_broken) = if let Some(entry) = entry {
-            finish_entry(entry, track, &mut stats).ok_or_else(corrupt)?
-        } else {
-            if track.last_lyrics_id.is_some() {
-                stats.lyrics_missing += 1;
-            }
-            (empty_entry.to_vec(), false)
+    let lyrics_path = bucket_path(tmp, "lyrics", bucket);
+    let lyrics_memory =
+        std::fs::metadata(&lyrics_path).map_or(0, |m| m.len()) * MEMORY_PER_TEMP_BYTE;
+    let parts = usize::try_from(lyrics_memory.div_ceil(max_memory.max(1)).max(1))
+        .unwrap_or(1)
+        .min(keyed.len().max(1));
+    let mut maker = BlockMaker::new(blocks);
+    let mut lyrics: HashMap<u32, Vec<u8>> = HashMap::new();
+    if parts == 1 {
+        read_lyrics(&lyrics_path, &mut lyrics)?;
+        for (key, track) in &keyed {
+            let entry = track.last_lyrics_id.and_then(|id| lyrics.get(&id));
+            maker.add(*key, track, entry.map(Vec::as_slice))?;
+        }
+        return maker.finish();
+    }
+
+    tracing::info!(bucket, parts, "splitting a large bucket");
+    maker.out.stats.split_buckets += 1;
+    let bounds: Vec<usize> = (0..=parts).map(|p| p * keyed.len() / parts).collect();
+    let mut part_of: HashMap<u32, Vec<usize>> = HashMap::new();
+    for p in 0..parts {
+        let (Some(&from), Some(&to)) = (bounds.get(p), bounds.get(p + 1)) else {
+            continue;
         };
-        put_bytes(&mut lyrics_block, &entry);
-        lyrics_entries += 1;
-        if lyrics_block.len() >= LYRICS_BLOCK_BYTES {
-            out.lyrics_blocks
-                .push((lyrics_entries, std::mem::take(&mut lyrics_block)));
-            lyrics_entries = 0;
+        for (_, track) in keyed.get(from..to).unwrap_or_default() {
+            if let Some(id) = track.last_lyrics_id {
+                let parts = part_of.entry(id).or_default();
+                if !parts.contains(&p) {
+                    parts.push(p);
+                }
+            }
         }
-
-        let mut record = Vec::with_capacity(96);
-        encode_track(track, lyrics_broken, &mut record, &mut stats);
-        track_keys.push(*key);
-        track_block.extend_from_slice(&record);
-        if track_keys.len() == TRACKS_PER_BLOCK {
-            out.track_blocks
-                .push(track_raw_block(&track_keys, &track_block));
-            track_keys.clear();
-            track_block.clear();
+    }
+    let part_path = |p: usize| tmp.join(format!("lyrics-{bucket:04}-part-{p:04}"));
+    let mut files: Vec<BucketFile> = (0..parts)
+        .map(|p| BucketFile::new(part_path(p), LYRICS_FRAME))
+        .collect();
+    read_bucket(&lyrics_path, |record| {
+        let id = Reader::new(record)
+            .varint()
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(corrupt)?;
+        for p in part_of.get(&id).map_or(&[][..], Vec::as_slice) {
+            if let Some(file) = files.get_mut(*p) {
+                file.push(record)?;
+            }
         }
-        out.ids.push(track.id);
-        out.docs.push(search::Doc {
-            track_id: i64::from(track.id),
-            name_lower: track.name_lower.clone(),
-            artist_lower: track.artist_lower.clone(),
-            album_lower: track.album_lower.clone(),
-        });
+        Ok(())
+    })?;
+    for file in &mut files {
+        file.flush()?;
     }
-    if lyrics_entries > 0 {
-        out.lyrics_blocks.push((lyrics_entries, lyrics_block));
+    drop(part_of);
+    for p in 0..parts {
+        lyrics.clear();
+        read_lyrics(&part_path(p), &mut lyrics)?;
+        let _ = std::fs::remove_file(part_path(p));
+        let (Some(&from), Some(&to)) = (bounds.get(p), bounds.get(p + 1)) else {
+            continue;
+        };
+        for (key, track) in keyed.get(from..to).unwrap_or_default() {
+            let entry = track.last_lyrics_id.and_then(|id| lyrics.get(&id));
+            maker.add(*key, track, entry.map(Vec::as_slice))?;
+        }
     }
-    if !track_keys.is_empty() {
-        out.track_blocks
-            .push(track_raw_block(&track_keys, &track_block));
-    }
-    out.stats = stats;
-    Ok(out)
-}
-
-/// `[count][sort keys, u64 LE each][records]`
-fn track_raw_block(keys: &[u64], records: &[u8]) -> (u64, u32, Vec<u8>) {
-    let mut raw = Vec::with_capacity(4 + keys.len() * 8 + records.len());
-    put_varint(&mut raw, keys.len() as u64);
-    for k in keys {
-        raw.extend_from_slice(&k.to_le_bytes());
-    }
-    raw.extend_from_slice(records);
-    #[allow(clippy::cast_possible_truncation)] // TRACKS_PER_BLOCK
-    (
-        keys.first().copied().unwrap_or_default(),
-        keys.len() as u32,
-        raw,
-    )
+    maker.finish()
 }
 
 struct Dicts {
@@ -1066,44 +1214,34 @@ struct Dicts {
     lyrics: zstd::dict::EncoderDictionary<'static>,
 }
 
-fn compress_bucket(raw: RawBucket, dicts: &Dicts) -> Result<BucketOut, ImportError> {
-    let mut tracks = zstd::bulk::Compressor::with_prepared_dictionary(&dicts.tracks)
-        .map_err(ImportError::Compress)?;
-    let mut lyrics = zstd::bulk::Compressor::with_prepared_dictionary(&dicts.lyrics)
-        .map_err(ImportError::Compress)?;
-    let track_blocks = raw
-        .track_blocks
-        .into_iter()
-        .map(|(key, n, b)| tracks.compress(&b).map(|c| (key, n, c)))
-        .collect::<Result<_, _>>()
-        .map_err(ImportError::Compress)?;
-    let lyrics_blocks = raw
-        .lyrics_blocks
-        .into_iter()
-        .map(|(n, b)| lyrics.compress(&b).map(|c| (n, c)))
-        .collect::<Result<_, _>>()
-        .map_err(ImportError::Compress)?;
-    Ok(BucketOut {
-        track_blocks,
-        lyrics_blocks,
-        ids: raw.ids,
-        docs: raw.docs,
-        stats: raw.stats,
-    })
-}
-
-/// Samples for dictionary training: records of a few buckets, split up the way they are compressed.
-fn train(tmp: &Path, level: i32) -> Result<Dicts, ImportError> {
+/// Trains the compression dictionaries on samples of a few buckets, in pieces the size of what they compress
+/// (zstd needs about a hundred times the dictionary's size of samples).
+fn train(tmp: &Path, level: i32, max_memory: u64) -> Result<Dicts, ImportError> {
     let mut track_samples: Vec<Vec<u8>> = Vec::new();
     let mut lyrics_samples: Vec<Vec<u8>> = Vec::new();
+    let all: u64 = (0..BUCKETS)
+        .step_by(BUCKETS / TRAINING_BUCKETS)
+        .filter_map(|b| std::fs::metadata(bucket_path(tmp, "lyrics", b)).ok())
+        .map(|m| m.len())
+        .sum();
+    // Lyrics blocks of the training buckets (each ~25 KB of temporary file), and how many to skip between samples.
+    let blocks = usize::try_from(all / (25 << 10))
+        .unwrap_or(usize::MAX)
+        .max(1);
+    let wanted = (LYRICS_DICT_BYTES * 100) / (8 << 10);
+    let every = (blocks / wanted).max(1);
     for bucket in (0..BUCKETS).step_by(BUCKETS / TRAINING_BUCKETS) {
-        let raw = build_bucket(tmp, bucket)?;
-        track_samples.extend(raw.track_blocks.into_iter().map(|(_, _, b)| b));
-        for (_, block) in raw.lyrics_blocks {
-            // Smaller samples than whole blocks train better dictionaries.
-            lyrics_samples.extend(block.chunks(8 << 10).map(<[u8]>::to_vec));
-        }
+        let blocks = Blocks::Samples {
+            every,
+            seen: 0,
+            tracks: &mut track_samples,
+            lyrics: &mut lyrics_samples,
+        };
+        build_bucket(tmp, bucket, blocks, max_memory)?;
     }
+    // Track blocks are small; a few hundred are enough.
+    let step = (track_samples.len() / 400).max(1);
+    let track_samples: Vec<Vec<u8>> = track_samples.into_iter().step_by(step).collect();
     let dict = |samples: &[Vec<u8>], size: usize| -> Vec<u8> {
         if samples.len() < 16 {
             return Vec::new();
@@ -1117,6 +1255,15 @@ fn train(tmp: &Path, level: i32) -> Result<Dicts, ImportError> {
     Ok(Dicts {
         tracks: zstd::dict::EncoderDictionary::copy(&tracks, level),
         lyrics: zstd::dict::EncoderDictionary::copy(&lyrics, level),
+    })
+}
+
+fn compressors(dicts: &Dicts) -> Result<Blocks<'_>, ImportError> {
+    Ok(Blocks::Store {
+        tracks: zstd::bulk::Compressor::with_prepared_dictionary(&dicts.tracks)
+            .map_err(ImportError::Compress)?,
+        lyrics: zstd::bulk::Compressor::with_prepared_dictionary(&dicts.lyrics)
+            .map_err(ImportError::Compress)?,
     })
 }
 
@@ -1252,11 +1399,15 @@ impl Writer {
             w.flush().map_err(err)?;
             w.get_ref().sync_all().map_err(err)?;
         }
-        let mut ids = Vec::with_capacity(self.ids.len() * 4);
+        let path = self.out.join(IDS);
+        let mut ids = BufWriter::with_capacity(1 << 20, File::create(&path).map_err(io(&path))?);
         for id in &self.ids {
-            ids.extend_from_slice(&id.to_le_bytes());
+            ids.write_all(&id.to_le_bytes()).map_err(io(&path))?;
         }
-        write_synced(&self.out.join(IDS), &ids)?;
+        ids.flush().map_err(io(&path))?;
+        ids.get_ref().sync_all().map_err(io(&path))?;
+        drop(ids);
+        self.ids = Vec::new();
         tracing::info!("merging the search index");
         self.search
             .finish()
@@ -1271,6 +1422,7 @@ fn merge(into: &mut ImportStats, s: &ImportStats) {
     into.lower_exceptions += s.lower_exceptions;
     into.broken_tracks += s.broken_tracks;
     into.lyrics_missing += s.lyrics_missing;
+    into.split_buckets += s.split_buckets;
 }
 
 /// The memory each bucket takes while it is built, estimated from its temporary files.
@@ -1286,6 +1438,112 @@ fn bucket_weights(tmp: &Path) -> Vec<u64> {
         .collect()
 }
 
+/// Pass 2's buckets: made in parallel, written in order. A bucket starts when it is within `window` of the next one
+/// to write, and when the buckets being made take less than `budget` (estimated from the size of their temporary
+/// files, at most `max_bucket` each: larger buckets are made in parts).
+struct Schedule {
+    weights: Vec<u64>,
+    window: usize,
+    budget: u64,
+    max_bucket: u64,
+    next: AtomicUsize,
+    /// (buckets written, memory of the buckets being made)
+    admission: Mutex<(usize, u64)>,
+    admission_cv: Condvar,
+    done: Mutex<BTreeMap<usize, Result<BucketOut, ImportError>>>,
+    done_cv: Condvar,
+    failed: AtomicBool,
+}
+
+impl Schedule {
+    fn new(tmp: &Path, threads: usize, budget: u64, max_bucket: u64) -> Self {
+        let weights = bucket_weights(tmp);
+        tracing::info!(
+            largest_bucket_mb = weights.iter().copied().max().unwrap_or_default() >> 20,
+            all_buckets_mb = weights.iter().sum::<u64>() >> 20,
+            "sorting buckets"
+        );
+        Self {
+            weights,
+            window: threads * 2,
+            budget,
+            max_bucket,
+            next: AtomicUsize::new(0),
+            admission: Mutex::new((0, 0)),
+            admission_cv: Condvar::new(),
+            done: Mutex::new(BTreeMap::new()),
+            done_cv: Condvar::new(),
+            failed: AtomicBool::new(false),
+        }
+    }
+
+    /// A worker thread: makes buckets until there are none left.
+    fn work(&self, tmp: &Path, dicts: &Dicts, stop: &AtomicBool) {
+        loop {
+            let bucket = self.next.fetch_add(1, Ordering::Relaxed);
+            if bucket >= BUCKETS || self.failed.load(Ordering::Relaxed) {
+                return;
+            }
+            let weight = self
+                .weights
+                .get(bucket)
+                .copied()
+                .unwrap_or_default()
+                .min(self.max_bucket);
+            if let Ok(mut a) = self.admission.lock() {
+                while (bucket >= a.0 + self.window || (a.1 > 0 && a.1 + weight > self.budget))
+                    && !self.failed.load(Ordering::Relaxed)
+                {
+                    a = match self.admission_cv.wait(a) {
+                        Ok(a) => a,
+                        Err(_) => return,
+                    };
+                }
+                a.1 += weight;
+            }
+            let result = if stop.load(Ordering::Relaxed) {
+                Err(ImportError::Stopped)
+            } else {
+                compressors(dicts)
+                    .and_then(|blocks| build_bucket(tmp, bucket, blocks, self.max_bucket))
+            };
+            // What is left of the bucket (its compressed blocks) is small.
+            if let Ok(mut a) = self.admission.lock() {
+                a.1 = a.1.saturating_sub(weight);
+                self.admission_cv.notify_all();
+            }
+            if let Ok(mut d) = self.done.lock() {
+                d.insert(bucket, result);
+                self.done_cv.notify_all();
+            }
+        }
+    }
+
+    /// Waits for bucket `bucket` to be made.
+    fn take(&self, bucket: usize) -> Result<BucketOut, ImportError> {
+        let poisoned = || ImportError::Data("a worker failed".to_owned());
+        let mut d = self.done.lock().map_err(|_| poisoned())?;
+        loop {
+            if let Some(item) = d.remove(&bucket) {
+                return item;
+            }
+            d = self.done_cv.wait(d).map_err(|_| poisoned())?;
+        }
+    }
+
+    fn written(&self, bucket: usize) {
+        if let Ok(mut a) = self.admission.lock() {
+            a.0 = bucket + 1;
+            self.admission_cv.notify_all();
+        }
+    }
+
+    fn fail(&self) {
+        self.failed.store(true, Ordering::Relaxed);
+        self.admission_cv.notify_all();
+    }
+}
+
 fn pass2(
     tmp: &Path,
     out: &Path,
@@ -1294,98 +1552,38 @@ fn pass2(
     stop: &AtomicBool,
     stats: &mut ImportStats,
 ) -> Result<Meta, ImportError> {
-    let dicts = train(tmp, options.level)?;
+    // A bucket larger than its share of the memory is made in parts.
+    let max_bucket = (options.memory as u64 / options.threads.max(1) as u64).max(1 << 20);
+    let dicts = train(tmp, options.level, max_bucket)?;
     let mut writer = Writer::create(out, pass1.max_track_id, options)?;
 
-    // Buckets are built in parallel and written in order. A bucket starts when it is within `window` of the next one
-    // to write, and when the buckets being built take less than `options.memory` (estimated from the size of their
-    // temporary files; a bucket larger than that is built alone).
     let threads = options.threads.max(1);
-    let window = threads * 2;
-    let weights = bucket_weights(tmp);
-    let budget = options.memory as u64;
-    let next = AtomicUsize::new(0);
-    // (buckets written, memory of the buckets being built)
-    let admission = Mutex::new((0usize, 0u64));
-    let written_cv = Condvar::new();
-    let done: Mutex<BTreeMap<usize, Result<BucketOut, ImportError>>> = Mutex::new(BTreeMap::new());
-    let done_cv = Condvar::new();
-    let failed = AtomicBool::new(false);
-
+    let schedule = Schedule::new(tmp, threads, options.memory as u64, max_bucket);
     std::thread::scope(|scope| -> Result<(), ImportError> {
         for _ in 0..threads {
-            scope.spawn(|| {
-                loop {
-                    let bucket = next.fetch_add(1, Ordering::Relaxed);
-                    if bucket >= BUCKETS || failed.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let weight = weights.get(bucket).copied().unwrap_or_default();
-                    if let Ok(mut a) = admission.lock() {
-                        while (bucket >= a.0 + window || (a.1 > 0 && a.1 + weight > budget))
-                            && !failed.load(Ordering::Relaxed)
-                        {
-                            a = match written_cv.wait(a) {
-                                Ok(a) => a,
-                                Err(_) => return,
-                            };
-                        }
-                        a.1 += weight;
-                    }
-                    let result = if stop.load(Ordering::Relaxed) {
-                        Err(ImportError::Stopped)
-                    } else {
-                        build_bucket(tmp, bucket).and_then(|raw| compress_bucket(raw, &dicts))
-                    };
-                    // What is left of the bucket (its compressed blocks) is small.
-                    if let Ok(mut a) = admission.lock() {
-                        a.1 = a.1.saturating_sub(weight);
-                        written_cv.notify_all();
-                    }
-                    if let Ok(mut d) = done.lock() {
-                        d.insert(bucket, result);
-                        done_cv.notify_all();
-                    }
-                }
-            });
+            scope.spawn(|| schedule.work(tmp, &dicts, stop));
         }
-
         let mut result = Ok(());
         for bucket in 0..BUCKETS {
-            let item = {
-                let Ok(mut d) = done.lock() else {
-                    result = Err(ImportError::Data("poisoned".to_owned()));
-                    break;
-                };
-                loop {
-                    if let Some(item) = d.remove(&bucket) {
-                        break item;
-                    }
-                    d = match done_cv.wait(d) {
-                        Ok(d) => d,
-                        Err(_) => return Err(ImportError::Data("poisoned".to_owned())),
-                    };
-                }
-            };
-            let wrote = item.and_then(|b| writer.write(b, stats));
-            if let Err(e) = wrote {
+            if let Err(e) = schedule.take(bucket).and_then(|b| writer.write(b, stats)) {
                 result = Err(e);
                 break;
             }
             for kind in ["tracks", "lyrics"] {
                 let _ = std::fs::remove_file(bucket_path(tmp, kind, bucket));
             }
-            if let Ok(mut a) = admission.lock() {
-                a.0 = bucket + 1;
-                written_cv.notify_all();
-            }
+            schedule.written(bucket);
             if bucket % 64 == 63 {
-                tracing::info!(buckets = bucket + 1, of = BUCKETS, "writing the store");
+                tracing::info!(
+                    buckets = bucket + 1,
+                    of = BUCKETS,
+                    rss_mb = rss_mb(),
+                    "writing the store"
+                );
             }
         }
         if result.is_err() {
-            failed.store(true, Ordering::Relaxed);
-            written_cv.notify_all();
+            schedule.fail();
         }
         result
     })?;
