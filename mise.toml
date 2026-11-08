@@ -24,7 +24,7 @@ run = "npm run build"
 
 [tasks.dev]
 description = "Run the server on ./dev-data (updates off: put a dump in dev-data/dumps)"
-run = "cargo run -- --data-dir dev-data --listen 127.0.0.1:3300 --update-interval 0"
+run = "cargo run -- --data-dir dev-data --listen 127.0.0.1:3300 --update-schedule off"
 
 [tasks.fmt]
 description = "Format the Rust code"
