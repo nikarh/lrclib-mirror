@@ -38,6 +38,10 @@ run = ["cargo fmt --all --check", "cargo clippy --locked --workspace --all-targe
 description = "Run the tests"
 run = "cargo test --locked --workspace"
 
+[tasks.compare]
+description = "Compare with LRCLIB's server on the same dump: same answers, and timings (see tools/compare)"
+run = "cargo run --locked --release -p lrclib-compare --"
+
 [tasks.deny]
 description = "Audit dependencies: advisories, licenses, duplicates, sources"
 run = "cargo deny check"

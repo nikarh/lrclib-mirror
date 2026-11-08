@@ -12,6 +12,7 @@ keywords = ["lrclib", "lyrics", "lrc", "mirror"]
 categories = ["web-programming::http-server"]
 
 [workspace]
+members = ["tools/compare"]
 # The web search is a submodule (a node project).
 exclude = ["upstream"]
 

@@ -18,6 +18,7 @@ RUN apk add --no-cache musl-dev gcc git bash ca-certificates
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src src
+COPY tools tools
 COPY --from=web /src/upstream/lrclib-homepage/dist upstream/lrclib-homepage/dist
 # The build context has no git metadata: the web search's upstream commit for --version.
 ARG LRCLIB_HOMEPAGE_COMMIT="" LRCLIB_MIRROR_VERSION_SUFFIX=""
