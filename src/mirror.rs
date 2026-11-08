@@ -27,7 +27,7 @@ use crate::store::{self, ImportError, ImportOptions, Store, StoreError, default_
 
 const PARTIAL: &str = ".partial";
 const REMOVING: &str = ".removing";
-/// After a failed update, the next try comes this soon (or at the update interval, when shorter).
+/// After a failed update, the next try comes this soon (or at the next scheduled time, when sooner).
 const RETRY: Duration = Duration::from_hours(1);
 
 #[derive(Debug, thiserror::Error)]
@@ -181,7 +181,7 @@ impl Mirror {
             }
         }
 
-        if self.config.update_interval.is_none() {
+        if self.config.update_schedule.is_none() {
             match self.local_dump().await {
                 Some((path, name)) if served.as_deref() < Some(name.as_str()) => {
                     drop(guard);
@@ -233,17 +233,32 @@ impl Mirror {
         .await
     }
 
-    /// Checks for a newer dump every `update_interval` (sooner after a failure), forever.
+    /// Checks for a newer dump now and then at each time of `update_schedule` (sooner after a failure), forever.
     pub async fn run_updates(self: Arc<Self>) {
-        let Some(interval) = self.config.update_interval else {
+        let Some(schedule) = self.config.update_schedule.clone() else {
             return;
         };
         loop {
-            let wait = match self.update().await {
-                Ok(()) => interval,
+            let failed = match self.update().await {
+                Ok(()) => false,
                 Err(e) => {
                     tracing::error!(error = %e, "dump update failed");
-                    interval.min(RETRY)
+                    true
+                }
+            };
+            let wait = match schedule.next() {
+                Some((_, wait)) if failed && wait > RETRY => {
+                    tracing::info!("next check for a new dump in {}", human(RETRY));
+                    RETRY
+                }
+                Some((next, wait)) => {
+                    tracing::info!("next check for a new dump at {next} (in {})", human(wait));
+                    wait
+                }
+                None if failed => RETRY,
+                None => {
+                    tracing::warn!(%schedule, "the update schedule has no next time: no more checks for a new dump");
+                    return;
                 }
             };
             tokio::time::sleep(wait).await;
@@ -466,4 +481,41 @@ async fn dir_size(dir: PathBuf) -> u64 {
 fn free_bytes(dir: &Path) -> std::io::Result<u64> {
     let stat = rustix::fs::statvfs(dir)?;
     Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+}
+
+/// A duration for the log, like `19h 34m 5s`.
+fn human(d: Duration) -> String {
+    let s = d.as_secs();
+    let parts = [
+        (s / 86_400, "d"),
+        (s / 3600 % 24, "h"),
+        (s / 60 % 60, "m"),
+        (s % 60, "s"),
+    ];
+    let text: Vec<String> = parts
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, unit)| format!("{n}{unit}"))
+        .collect();
+    if text.is_empty() {
+        "0s".to_owned()
+    } else {
+        text.join(" ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_durations() {
+        assert_eq!(human(Duration::from_hours(24)), "1d");
+        assert_eq!(human(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(
+            human(Duration::from_secs(19 * 3600 + 34 * 60 + 5)),
+            "19h 34m 5s"
+        );
+        assert_eq!(human(Duration::ZERO), "0s");
+    }
 }
