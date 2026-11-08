@@ -36,7 +36,7 @@ jobs:
         with:
           path: ~/.npm
           key: npm-${{ hashFiles('upstream/lrclib-homepage/package-lock.json') }}
-      # The patches apply to the upstream submodules; rustfmt, clippy, tests; the web search builds; every action
+      # The patches apply to the web search submodule; rustfmt, clippy, tests; the web search builds; every action
       # pinned to a commit and allowed (.github/allowed-actions.txt).
       - run: mise run ci
 

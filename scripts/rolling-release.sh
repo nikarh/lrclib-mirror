@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 # Points the rolling release TAG (latest or dev) at $GITHUB_SHA, creating the tag and the release when missing, with
-# notes naming the upstream commits the build contains. FLAG: --latest (GitHub's latest release) or --prerelease.
+# notes naming the upstream commit of the web search the build contains. FLAG: --latest (GitHub's latest release) or --prerelease.
 # Usage: rolling-release.sh TAG TITLE FLAG; needs GH_TOKEN and GH_REPO (the bot's token: Publish then uploads).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tag=$1 title=$2 flag=$3
 
 commit() { git ls-tree HEAD "upstream/$1" | awk '{print $3}'; }
-lrclib=$(commit lrclib)
 homepage=$(commit lrclib-homepage)
 notes=$(mktemp)
 cat > "$notes" <<NOTES
-Built from \`${GITHUB_REF_NAME:-main}\` at ${GITHUB_SHA:0:7}, rebuilt on every change. Upstream:
+Built from \`${GITHUB_REF_NAME:-main}\` at ${GITHUB_SHA:0:7}, rebuilt on every change. Web search:
 
-- [lrclib](https://github.com/tranxuanthang/lrclib/commit/$lrclib) \`${lrclib:0:7}\`
 - [lrclib-homepage](https://github.com/tranxuanthang/lrclib-homepage/commit/$homepage) \`${homepage:0:7}\`
 
 Image: \`ghcr.io/nikarh/lrclib-mirror:$([[ $tag == latest ]] && echo main || echo "$tag")\`. Verify the files with

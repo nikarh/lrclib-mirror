@@ -1,9 +1,9 @@
-//! LRCLIB's public database dumps: the listing, the download (gunzipped while it streams) and a sanity check.
+//! LRCLIB's public database dumps: the listing, and the download as a stream (gunzipped by the reader).
 
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::io::Read;
 use std::time::Duration;
 
+use bytes::Buf as _;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -15,14 +15,8 @@ const PROGRESS_EVERY: u64 = 5 << 30;
 pub enum DumpError {
     #[error(transparent)]
     Http(#[from] reqwest::Error),
-    #[error("{0}: {1}")]
-    Io(PathBuf, std::io::Error),
-    #[error("{0}: {1}")]
-    Sqlite(PathBuf, rusqlite::Error),
     #[error("the download stalled for {}s", STALL_TIMEOUT.as_secs())]
     Stalled,
-    #[error("{0} is not an LRCLIB database: {1}")]
-    NotLrclib(PathBuf, String),
 }
 
 #[derive(Deserialize)]
@@ -37,6 +31,7 @@ struct Object {
 
 /// A dump's name in the listing, e.g. `lrclib-db-dump-20261030T182259Z.sqlite3.gz`. Only names of this shape are
 /// accepted (they become file names), and they sort by date.
+#[must_use]
 pub fn is_dump_key(key: &str) -> bool {
     key.strip_prefix("lrclib-db-dump-")
         .and_then(|k| k.strip_suffix(".sqlite3.gz"))
@@ -48,9 +43,10 @@ pub fn is_dump_key(key: &str) -> bool {
         })
 }
 
-/// The file a dump is unpacked to.
-pub fn db_file_name(key: &str) -> &str {
-    key.strip_suffix(".gz").unwrap_or(key)
+/// The name of the store made from a dump: its key without the extensions.
+#[must_use]
+pub fn store_name(key: &str) -> &str {
+    key.strip_suffix(".sqlite3.gz").unwrap_or(key)
 }
 
 /// The newest dump in the listing.
@@ -73,92 +69,66 @@ pub async fn latest(
         .max())
 }
 
-/// Downloads `url` and writes it gunzipped to `dest`. A broken transfer fails (gzip's length and CRC check covers
-/// the end), so a complete file is never confused with a cut one.
-pub async fn download(client: &reqwest::Client, url: &str, dest: &Path) -> Result<(), DumpError> {
-    let mut response = client.get(url).send().await?.error_for_status()?;
+/// The body of a download, read by a blocking reader while an async task receives it. A stalled download, or one
+/// that fails, ends the reader with an error.
+pub struct Download {
+    rx: mpsc::Receiver<std::io::Result<bytes::Bytes>>,
+    chunk: bytes::Bytes,
+}
 
-    let (tx, rx) = mpsc::channel::<bytes::Bytes>(64);
-    let path = dest.to_owned();
-    let writer = tokio::task::spawn_blocking(move || write_gunzipped(&path, rx));
-
-    let mut received = 0u64;
-    let mut next_report = PROGRESS_EVERY;
-    let streamed = async {
-        loop {
-            let Some(chunk) = tokio::time::timeout(STALL_TIMEOUT, response.chunk())
-                .await
-                .map_err(|_| DumpError::Stalled)??
-            else {
-                return Ok::<(), DumpError>(());
-            };
-            received += chunk.len() as u64;
-            if received >= next_report {
-                tracing::info!(downloaded_gb = received >> 30, "downloading");
-                next_report += PROGRESS_EVERY;
-            }
-            if tx.send(chunk).await.is_err() {
-                // The writer failed; its error is reported below.
-                return Ok(());
+impl Read for Download {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while !self.chunk.has_remaining() {
+            match self.rx.blocking_recv() {
+                Some(Ok(chunk)) => self.chunk = chunk,
+                Some(Err(e)) => return Err(e),
+                None => return Ok(0),
             }
         }
+        let n = buf.len().min(self.chunk.remaining());
+        self.chunk
+            .copy_to_slice(buf.get_mut(..n).unwrap_or_default());
+        Ok(n)
     }
-    .await;
-    drop(tx);
-
-    let written = writer
-        .await
-        .map_err(|e| DumpError::Io(dest.to_owned(), std::io::Error::other(e)))?;
-    streamed?;
-    written
 }
 
-fn write_gunzipped(path: &Path, mut rx: mpsc::Receiver<bytes::Bytes>) -> Result<(), DumpError> {
-    let io = |e| DumpError::Io(path.to_owned(), e);
-    let file = std::fs::File::create(path).map_err(io)?;
-    let mut decoder =
-        flate2::write::GzDecoder::new(std::io::BufWriter::with_capacity(1 << 20, file));
-    while let Some(chunk) = rx.blocking_recv() {
-        decoder.write_all(&chunk).map_err(io)?;
-    }
-    // Fails on a stream that ended early: the trailer (CRC and length) is missing or wrong.
-    let file = decoder
-        .finish()
-        .map_err(io)?
-        .into_inner()
-        .map_err(|e| io(e.into_error()))?;
-    file.sync_all().map_err(io)
+/// Starts downloading `url`. The body is read from the returned [`Download`] (on a blocking thread).
+pub async fn download(client: &reqwest::Client, url: &str) -> Result<Download, DumpError> {
+    let mut response = client.get(url).send().await?.error_for_status()?;
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        let mut received = 0u64;
+        let mut next_report = PROGRESS_EVERY;
+        loop {
+            let chunk = match tokio::time::timeout(STALL_TIMEOUT, response.chunk()).await {
+                Err(_) => Err(std::io::Error::other(DumpError::Stalled)),
+                Ok(Err(e)) => Err(std::io::Error::other(e)),
+                Ok(Ok(None)) => return,
+                Ok(Ok(Some(chunk))) => Ok(chunk),
+            };
+            if let Ok(chunk) = &chunk {
+                received += chunk.len() as u64;
+                if received >= next_report {
+                    tracing::info!(downloaded_gb = received >> 30, "downloading");
+                    next_report += PROGRESS_EVERY;
+                }
+            }
+            let failed = chunk.is_err();
+            // The reader is gone: it failed or stopped.
+            if tx.send(chunk).await.is_err() || failed {
+                return;
+            }
+        }
+    });
+    Ok(Download {
+        rx,
+        chunk: bytes::Bytes::new(),
+    })
 }
 
-/// Checks that `path` is an LRCLIB database with tracks.
-pub fn check(path: &Path) -> Result<(), DumpError> {
-    let sqlite = |e| DumpError::Sqlite(path.to_owned(), e);
-    let db =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(sqlite)?;
-    let tables: i64 = db
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name IN ('tracks', 'lyrics')",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(sqlite)?;
-    if tables != 2 {
-        return Err(DumpError::NotLrclib(
-            path.to_owned(),
-            "no tracks and lyrics tables".to_owned(),
-        ));
-    }
-    let max: Option<i64> = db
-        .query_row("SELECT max(id) FROM tracks", [], |r| r.get(0))
-        .map_err(sqlite)?;
-    if max.unwrap_or(0) <= 0 {
-        return Err(DumpError::NotLrclib(
-            path.to_owned(),
-            "no tracks".to_owned(),
-        ));
-    }
-    Ok(())
+/// A dump, gunzipped (a broken or cut stream fails: gzip's trailer has the length and a CRC).
+pub fn gunzip<R: Read>(input: R) -> impl Read {
+    flate2::read::MultiGzDecoder::new(std::io::BufReader::with_capacity(1 << 20, input))
 }
 
 #[cfg(test)]
@@ -172,36 +142,24 @@ mod tests {
         assert!(!is_dump_key("lrclib-db-dump-../x.sqlite3.gz"));
         assert!(!is_dump_key("other.sqlite3.gz"));
         assert_eq!(
-            db_file_name("lrclib-db-dump-20261030T182259Z.sqlite3.gz"),
-            "lrclib-db-dump-20261030T182259Z.sqlite3"
+            store_name("lrclib-db-dump-20261030T182259Z.sqlite3.gz"),
+            "lrclib-db-dump-20261030T182259Z"
         );
     }
 
-    #[tokio::test]
-    async fn gunzips_and_rejects_cut_streams() {
-        let dir = std::env::temp_dir().join(format!("lrclib-mirror-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    #[test]
+    fn gunzips_and_rejects_cut_streams() {
+        use std::io::Write as _;
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         gz.write_all(&vec![7u8; 100_000]).unwrap();
         let gz = gz.finish().unwrap();
-
-        for (name, data, ok) in [
-            ("whole", &gz[..], true),
-            ("cut", &gz[..gz.len() - 4], false),
-        ] {
-            let (tx, rx) = mpsc::channel(4);
-            let path = dir.join(name);
-            let writer = tokio::task::spawn_blocking(move || write_gunzipped(&path, rx));
-            for chunk in data.chunks(1000) {
-                tx.send(bytes::Bytes::copy_from_slice(chunk)).await.unwrap();
-            }
-            drop(tx);
-            assert_eq!(writer.await.unwrap().is_ok(), ok, "{name}");
-        }
-        assert_eq!(
-            std::fs::read(dir.join("whole")).unwrap(),
-            vec![7u8; 100_000]
+        let mut out = Vec::new();
+        gunzip(&gz[..]).read_to_end(&mut out).unwrap();
+        assert_eq!(out, vec![7u8; 100_000]);
+        assert!(
+            gunzip(&gz[..gz.len() - 4])
+                .read_to_end(&mut Vec::new())
+                .is_err()
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

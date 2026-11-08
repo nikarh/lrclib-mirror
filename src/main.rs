@@ -1,10 +1,7 @@
-//! lrclib-mirror: the LRCLIB server (as a library) and its web search on a local copy of LRCLIB's public database
-//! dump, which it keeps up to date without restarting.
+//! lrclib-mirror: LRCLIB's lookup API and web search, answered from a compact store built from LRCLIB's public
+//! database dump, which it keeps up to date without restarting.
 
-mod config;
-mod dump;
-mod mirror;
-mod web;
+use lrclib_mirror::{dump, store, web};
 
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
@@ -14,10 +11,10 @@ use std::time::Duration;
 
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{Config, HELP};
-use crate::mirror::Mirror;
+use lrclib_mirror::config::{Config, HELP};
+use lrclib_mirror::mirror::Mirror;
 
-const VERSION: &str = env!("LRCLIB_MIRROR_VERSION");
+use lrclib_mirror::VERSION;
 
 fn main() -> ExitCode {
     let mut args = pico_args::Arguments::from_env();
@@ -37,16 +34,39 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => return fail(&e),
     };
+    let positional = if command.as_deref() == Some("import") {
+        let mut free = Vec::new();
+        while let Ok(Some(arg)) = args.opt_free_from_str::<String>() {
+            free.push(arg);
+        }
+        free
+    } else {
+        Vec::new()
+    };
+    if let Err(e) = Config::finish(args) {
+        return fail(&e);
+    }
+    let logging = || {
+        tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new("info,tantivy=warn")),
+            )
+            .init();
+    };
 
     match command.as_deref() {
         Some("healthcheck") => healthcheck(config.listen),
+        Some("import") => {
+            let [dump, out] = positional.as_slice() else {
+                return fail(&"import needs DUMP and OUT; see --help");
+            };
+            logging();
+            import(dump, std::path::Path::new(out), &config)
+        }
         None | Some("serve") => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| EnvFilter::new("info,tantivy=warn")),
-                )
-                .init();
+            logging();
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -129,6 +149,43 @@ async fn signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = term.recv() => {}
+    }
+}
+
+/// Builds a store from a dump file.
+fn import(dump: &str, out: &std::path::Path, config: &Config) -> ExitCode {
+    if out.exists() {
+        return fail(&format!("{} exists", out.display()));
+    }
+    let input: Box<dyn std::io::Read> = if dump == "-" {
+        Box::new(std::io::stdin().lock())
+    } else {
+        match std::fs::File::open(dump) {
+            Ok(f) => Box::new(std::io::BufReader::with_capacity(1 << 20, f)),
+            Err(e) => return fail(&format!("{dump}: {e}")),
+        }
+    };
+    let input: Box<dyn std::io::Read> = if std::path::Path::new(dump)
+        .extension()
+        .is_some_and(|e| e == "gz")
+    {
+        Box::new(dump::gunzip(input))
+    } else {
+        input
+    };
+    let options = store::ImportOptions {
+        threads: config.import_threads,
+        memory: config.import_memory_bytes,
+        ..store::ImportOptions::default()
+    };
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    match store::import(input, out, &options, &stop) {
+        Ok(stats) => {
+            let _ = serde_json::to_writer_pretty(std::io::stdout(), &stats);
+            let _ = writeln!(std::io::stdout());
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&e),
     }
 }
 

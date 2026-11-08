@@ -12,19 +12,26 @@ pub const HELP: &str = "\
 lrclib-mirror: the LRCLIB API (read-only) and web search on a local copy of LRCLIB's public database dump
 
 Usage: lrclib-mirror [serve] [OPTIONS]
+       lrclib-mirror import DUMP OUT [--import-threads N] [--import-memory MB]
        lrclib-mirror healthcheck [--listen ADDR]
 
+  import                   builds a store in the new directory OUT from DUMP (an LRCLIB dump: .sqlite3,
+                           .sqlite3.gz, or - for standard input)
+
 Options (each has an environment variable fallback):
-  --data-dir DIR           LRCLIB_MIRROR_DATA_DIR       database dumps and the search index [/data]
+  --data-dir DIR           LRCLIB_MIRROR_DATA_DIR       the stores, and dumps to import [/data]
   --listen ADDR            LRCLIB_MIRROR_LISTEN         HTTP address [0.0.0.0:3300]
   --update-interval TIME   LRCLIB_MIRROR_UPDATE_INTERVAL
                                                         how often to check for a new dump (30m, 24h, 7d);
                                                         0: never [24h]
-  --min-free-gb GB         LRCLIB_MIRROR_MIN_FREE_GB    free space a dump download needs [300]
+  --min-free-gb GB         LRCLIB_MIRROR_MIN_FREE_GB    free space an import needs to start [60]
+  --import-threads N       LRCLIB_MIRROR_IMPORT_THREADS threads importing a dump [the number of CPUs]
+  --import-memory MB       LRCLIB_MIRROR_IMPORT_MEMORY  memory for the rows an import sorts at once, roughly
+                                                        (the search index writer takes 256 MB more) [1024]
   --listing-url URL        LRCLIB_MIRROR_LISTING_URL    the dump listing [LRCLIB's]
   --dump-url URL           LRCLIB_MIRROR_DUMP_URL       where dumps are downloaded from [LRCLIB's]
   -h, --help               this help
-  -V, --version            the version and the upstream commits
+  -V, --version            the version and the upstream commit of the web search
 
 Logging: RUST_LOG (default info,tantivy=warn).";
 
@@ -35,6 +42,8 @@ pub struct Config {
     /// `None`: never check for a new dump (the newest dump in the data directory is served).
     pub update_interval: Option<Duration>,
     pub min_free_bytes: u64,
+    pub import_threads: usize,
+    pub import_memory_bytes: usize,
     pub listing_url: String,
     pub dump_url: String,
 }
@@ -69,7 +78,21 @@ impl Config {
             "LRCLIB_MIRROR_UPDATE_INTERVAL",
             Interval(Some(Duration::from_hours(24))),
         )?;
-        let min_free_gb: u64 = value(args, "--min-free-gb", "LRCLIB_MIRROR_MIN_FREE_GB", 300)?;
+        let min_free_gb: u64 = value(args, "--min-free-gb", "LRCLIB_MIRROR_MIN_FREE_GB", 60)?;
+        let import_threads: usize = value(
+            args,
+            "--import-threads",
+            "LRCLIB_MIRROR_IMPORT_THREADS",
+            std::thread::available_parallelism().map_or(2, std::num::NonZero::get),
+        )?;
+        let import_memory_mb: usize =
+            value(args, "--import-memory", "LRCLIB_MIRROR_IMPORT_MEMORY", 1024)?;
+        if import_threads == 0 {
+            return Err(ConfigError::Invalid {
+                name: "--import-threads".to_owned(),
+                value: "0".to_owned(),
+            });
+        }
         let listing_url = value(
             args,
             "--listing-url",
@@ -83,7 +106,21 @@ impl Config {
             DEFAULT_DUMP_URL.to_owned(),
         )?;
 
-        let rest = args.clone().finish();
+        Ok(Self {
+            data_dir: PathBuf::from(data_dir),
+            listen,
+            update_interval: interval.0,
+            min_free_bytes: min_free_gb.saturating_mul(1 << 30),
+            import_threads,
+            import_memory_bytes: import_memory_mb.saturating_mul(1 << 20),
+            listing_url,
+            dump_url: dump_url.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    /// Fails on arguments left over.
+    pub fn finish(args: pico_args::Arguments) -> Result<(), ConfigError> {
+        let rest = args.finish();
         if !rest.is_empty() {
             let rest: Vec<_> = rest
                 .iter()
@@ -91,15 +128,7 @@ impl Config {
                 .collect();
             return Err(ConfigError::Unknown(rest.join(" ")));
         }
-
-        Ok(Self {
-            data_dir: PathBuf::from(data_dir),
-            listen,
-            update_interval: interval.0,
-            min_free_bytes: min_free_gb.saturating_mul(1 << 30),
-            listing_url,
-            dump_url: dump_url.trim_end_matches('/').to_owned(),
-        })
+        Ok(())
     }
 }
 
@@ -157,7 +186,9 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Config, ConfigError> {
         let mut args = pico_args::Arguments::from_vec(args.iter().map(Into::into).collect());
-        Config::parse(&mut args)
+        let config = Config::parse(&mut args)?;
+        Config::finish(args)?;
+        Ok(config)
     }
 
     #[test]

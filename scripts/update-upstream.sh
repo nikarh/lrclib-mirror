@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Moves the upstream submodules to the newest commit of their default branch and updates Cargo.lock (Dependabot
-# can't: it doesn't fetch the submodule the server crate comes from), and writes the pull request text to $1 (title on
-# the first line, then the body): the upstream commits since the current ones, changelog additions when upstream keeps
-# a changelog, and whether the patches still apply. Exits 3 when nothing changed. Leaves the changes uncommitted.
+# Moves the web search submodule (lrclib-homepage) to the newest commit of its default branch and updates Cargo.lock,
+# and writes the pull request text to $1 (title on the first line, then the body): the upstream commits since the
+# current one, changelog additions when upstream keeps a changelog, and whether the patches still apply. Exits 3 when
+# nothing changed. Leaves the changes uncommitted.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out=$1
 
 declare -A old new
-for name in lrclib lrclib-homepage; do
+for name in lrclib-homepage; do
   old[$name]=$(git ls-tree HEAD "upstream/$name" | awk '{print $3}')
 done
-git submodule update --init --remote --checkout upstream/lrclib upstream/lrclib-homepage
+git submodule update --init --remote --checkout upstream/lrclib-homepage
 changed=()
-for name in lrclib lrclib-homepage; do
+for name in lrclib-homepage; do
   new[$name]=$(git -C "upstream/$name" rev-parse HEAD)
   [[ ${old[$name]} == "${new[$name]}" ]] || changed+=("$name")
 done
