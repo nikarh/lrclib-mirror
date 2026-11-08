@@ -140,6 +140,8 @@ impl Mirror {
                 stores.push(partial.clone());
             }
         }
+        // Published ones are stores now, not imports to tidy up.
+        partials.retain(|p| !stores.contains(p));
         stores.sort();
         let mut kept = Vec::new();
         while let Some(newest) = stores.pop() {
