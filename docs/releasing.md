@@ -19,7 +19,7 @@ There are no versions: the builds follow `main` and the dependencies.
 | Asset | Contents |
 | --- | --- |
 | `lrclib-mirror-x86_64-unknown-linux-musl` | The static binary |
-| `LICENSE-lrclib` | The MIT license of LRCLIB's server (code ported to this crate) |
+| `LICENSE-lrclib`, `LICENSE-lrclib-homepage` | The MIT licenses of LRCLIB's server (code ported to this crate) and web search (reimplemented in `web/`) |
 | `SHA256SUMS`, `SHA256SUMS.asc` | Checksums of the files and their detached GPG signature |
 
 Dependabot's pull requests (actions, Docker base images) are merged by **Auto-merge** once every required check is

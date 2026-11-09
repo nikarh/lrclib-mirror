@@ -27,7 +27,7 @@ conditions, and what changed. Never frame them around a particular deployment, a
   - `config.rs`.
 - `tools/compare` - compares answers and timings with LRCLIB's server on the same dump (`mise run compare`).
 - `licenses/LICENSE-lrclib` - the license of LRCLIB's server, whose code `text.rs`, `lyricsfile.rs`, `search.rs` and
-  `api.rs` port.
+  `api.rs` port; `licenses/LICENSE-lrclib-homepage` - that of LRCLIB's web search, which `web/` reimplements.
 - `build.rs` embeds `web/dist` (`mise run web:build`).
 
 ## Rules

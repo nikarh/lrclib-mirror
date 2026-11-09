@@ -61,8 +61,8 @@ jobs:
 
           mkdir -p out
           cp "$bin" "out/lrclib-mirror-$TARGET"
-          # The MIT notice of LRCLIB's server, whose code is ported to this crate.
-          cp licenses/LICENSE-lrclib out/LICENSE-lrclib
+          # The MIT notices of LRCLIB's server (ported to this crate) and web search (reimplemented in web/).
+          cp licenses/LICENSE-lrclib licenses/LICENSE-lrclib-homepage out/
 
           root=ci-rootfs
           mkdir -p "$root/etc/ssl/certs"
