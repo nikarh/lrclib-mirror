@@ -165,7 +165,8 @@ fn import(dump: &str, out: &std::path::Path, config: &Config) -> ExitCode {
         return fail(&format!("{} exists and is not an import", out.display()));
     }
     if store::finished_store(out) {
-        return fail(&format!("{} is a finished store", out.display()));
+        // Run again after it finished (maybe interrupted while it exited): left as it is.
+        tracing::info!(store = %out.display(), "the store is finished");
     }
     let input: Box<dyn std::io::Read + Send> = if dump == "-" {
         Box::new(std::io::stdin())

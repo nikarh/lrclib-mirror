@@ -185,7 +185,7 @@ With updates off, put a dump into `<data-dir>/dumps/`, named like LRCLIB names i
 (`lrclib-db-dump-<date>.sqlite3.gz`, or unpacked as `.sqlite3`): it is imported at start when it is newer than the
 store. A store can also be built by hand, e.g. on another machine:
 `lrclib-mirror import lrclib-db-dump-<date>.sqlite3.gz <data-dir>/stores/lrclib-db-dump-<date>` (run again into
-the same directory, an interrupted `import` continues).
+the same directory, an interrupted `import` continues; a finished one is left as it is).
 
 ## Same answers as LRCLIB
 
