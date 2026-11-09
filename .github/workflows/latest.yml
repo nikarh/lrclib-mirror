@@ -1,9 +1,9 @@
 name: Latest
 
 # Keeps the `v2` release ("Latest") at the tip of main: on every push the tag moves to the new commit and Publish
-# builds, signs and uploads the files, and pushes the `v2` and `main` images. There are no versioned releases: what
-# upstream changes arrives through the Upstream workflow's pull requests. (The `v1` release and image are the previous
-# version, built from an SQLite copy of the dump: they stay as they were, see the README.)
+# builds, signs and uploads the files, and pushes the `v2` and `main` images. There are no versioned releases. (The
+# `v1` release and image are the previous version, built from an SQLite copy of the dump: they stay as they were, see
+# the README.)
 on:
   push:
     branches:

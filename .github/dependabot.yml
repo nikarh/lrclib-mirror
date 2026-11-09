@@ -1,6 +1,5 @@
 version: 2
-# Cargo.lock and web/package-lock.json are refreshed within the manifests' ranges by the daily Upstream workflow
-# (`cargo update`, `npm update`); new major versions are added by hand.
+# Cargo.lock and web/package-lock.json are updated by hand (`cargo update`, `npm update`), as are new major versions.
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"

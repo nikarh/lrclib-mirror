@@ -48,5 +48,5 @@ conditions, and what changed. Never frame them around a particular deployment, a
 - A change to the configuration updates `README.md` (and `src/config.rs`'s help) in the same commit.
 - The container image must keep working read-only, as any uid, with no capabilities: no writes outside the data
   directory, no listening on ports below 1024, nothing needing a shell or files from a distribution.
-- `Cargo.lock` and `web/package-lock.json` are refreshed by the daily Upstream workflow (`cargo update`,
-  `npm update`); Dependabot only handles actions and Docker.
+- `Cargo.lock` and `web/package-lock.json` are updated by hand (`cargo update`, `npm update`); Dependabot only handles
+  actions and Docker.

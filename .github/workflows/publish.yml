@@ -1,15 +1,14 @@
 name: Publish
 
 # Builds the static binary once, then pushes the container image to ghcr.io and signs and uploads the release files.
-# There are no versions, only two rolling releases, each with an image:
-# - `v2` ("Latest"): main (images `v2`, `main` and `v2-sha-<commit>`), from the Latest workflow
-# - `v2-dev` ("Dev"): the pending upstream update (images `v2-dev` and `dev`), from the Dev workflow
-# (The `v1` and `v1-dev` releases and images, and `sha-<commit>`, are the previous version's, no longer updated.)
+# There are no versions, only a rolling release: `v2` ("Latest"), main (images `v2`, `main` and `v2-sha-<commit>`),
+# from the Latest workflow. (The `v1`, `v1-dev` and `v2-dev` releases and images, and `sha-<commit>`, are no longer
+# updated.)
 on:
   workflow_call:
     inputs:
       tag:
-        description: The release, v2 or v2-dev
+        description: The release, v2
         type: string
         required: true
 
@@ -52,7 +51,7 @@ jobs:
       - name: Build the static binary with the web search embedded
         run: |
           set -euo pipefail
-          # --version: e.g. 2.0.0+abc1234 (v2), 2.0.0-dev+abc1234 (v2-dev)
+          # --version: e.g. 2.0.0+abc1234
           export LRCLIB_MIRROR_VERSION_SUFFIX="${TAG#v2}+${GITHUB_SHA:0:7}"
           mise run web:build
           cargo build --locked --release --target "$TARGET" -p lrclib-mirror
@@ -92,11 +91,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ $TAG == v2 ]]; then
-            tags=(v2 main "v2-sha-$(git rev-parse HEAD)")
-          else
-            tags=(v2-dev dev)
-          fi
+          tags=("$TAG" main "$TAG-sha-$(git rev-parse HEAD)")
           docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN"
           for tag in "${tags[@]}"; do
             docker tag lrclib-mirror:ci "$IMAGE:$tag"

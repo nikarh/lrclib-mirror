@@ -120,7 +120,6 @@ There are no versions, only builds of the newest code:
 | | Image | Release (binary, signed checksums) |
 | --- | --- | --- |
 | `main` | `ghcr.io/nikarh/lrclib-mirror:main` or `:v2` (and `:v2-sha-<commit>`) | [Latest (`v2`)](https://github.com/nikarh/lrclib-mirror/releases/tag/v2) |
-| pending update | `ghcr.io/nikarh/lrclib-mirror:dev` or `:v2-dev` | [Dev (`v2-dev`)](https://github.com/nikarh/lrclib-mirror/releases/tag/v2-dev) |
 
 The previous version, which answered with LRCLIB's server from an SQLite copy of the dump (~270 GB), is no longer
 updated: the `ghcr.io/nikarh/lrclib-mirror:v1` image (and `:v1-dev`, `:sha-<commit>`), the

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Points the rolling release TAG (v2 or v2-dev) at $GITHUB_SHA, creating the tag and the release when missing.
+# Points the rolling release TAG (v2) at $GITHUB_SHA, creating the tag and the release when missing.
 # FLAG: --latest (GitHub's latest release) or --prerelease.
 # Usage: rolling-release.sh TAG TITLE FLAG; needs GH_TOKEN and GH_REPO (the bot's token: Publish then uploads).
 set -euo pipefail

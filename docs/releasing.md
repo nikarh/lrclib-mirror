@@ -1,18 +1,12 @@
 # Releasing
 
-There are no versions: the builds follow `main` and the dependencies.
+There are no versions: the builds follow `main`.
 
 - **Latest** (every push to `main`): the `v2` tag moves to the new commit, the `v2` release ("Latest", GitHub's
   latest) gets the build's files, and the image is pushed as `v2`, `main` and `v2-sha-<commit>`. (The `v1` and
   `v1-dev` releases and images, and the `sha-<commit>` images, are the previous version's, built from the
   `legacy-sqlite` branch, and no longer updated.)
-- **Upstream** (daily, 04:17 UTC, or by hand): runs `cargo update` and `npm update` (in `web/`). When a lockfile
-  changed, it force-pushes the `upstream-update` branch (one commit on top of `main`) and opens a pull request, or
-  updates the open one, listing the packages that changed. Once merged, the branch is deleted and the next change
-  opens a new pull request.
-- **Dev** (every push to `upstream-update`): the `v2-dev` pre-release ("Dev") and the `v2-dev` and `dev` images, to try an update before
-  merging it.
-- **Publish** (called by Latest and Dev): builds the static x86_64 binary (musl, web search embedded), wraps it in the
+- **Publish** (called by Latest): builds the static x86_64 binary (musl, web search embedded), wraps it in the
   `FROM scratch` image, checks the image runs read-only without capabilities, pushes it to `ghcr.io/nikarh/lrclib-mirror`,
   writes `SHA256SUMS` and its GPG signature, and uploads them with the binary.
 
@@ -28,8 +22,8 @@ green.
 ## One-time setup
 
 The workflows act as the GitHub App `nikarh-release-bot` (*Contents* and *Pull requests* read & write), installed on
-the repository: what it pushes and opens triggers CI and Dev, which `GITHUB_TOKEN` wouldn't. The `release`
-environment allows the `main` and `upstream-update` branches and holds:
+the repository, to move the release tag and update the release. The `release` environment allows the `main` branch
+and holds:
 
 | Secret | Value |
 | --- | --- |
