@@ -1,6 +1,6 @@
 :root {
   --page-width: 760px;
-  --header-height: 64px;
+  --header-height: 72px;
   --bg: light-dark(#f5f4ef, var(--mantine-color-dark-8));
   --surface: light-dark(#ffffff, var(--mantine-color-dark-7));
   --hairline: light-dark(rgb(20 18 12 / 0.08), rgb(255 255 255 / 0.07));
@@ -42,13 +42,13 @@ body {
 }
 
 .header-inner {
-  max-width: calc(var(--page-width) + 32px);
+  max-width: calc(var(--page-width) + 40px);
   height: 100%;
   margin: 0 auto;
-  padding: 0 16px;
+  padding: 0 20px;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 20px;
 }
 
 .brand {
@@ -108,9 +108,9 @@ body {
 /* Page */
 
 .page {
-  max-width: calc(var(--page-width) + 32px);
+  max-width: calc(var(--page-width) + 40px);
   margin: 0 auto;
-  padding: 20px 16px 96px;
+  padding: 36px 20px 120px;
 }
 
 .empty-state {
@@ -118,8 +118,8 @@ body {
   flex-direction: column;
   align-items: center;
   text-align: center;
-  gap: 6px;
-  padding: 72px 0;
+  gap: 8px;
+  padding: 88px 0;
 }
 
 .empty-home {
@@ -147,7 +147,7 @@ body {
 }
 
 .screen-header {
-  margin: 8px 0 24px;
+  margin: 0 0 32px;
 }
 
 .eyebrow {
@@ -184,8 +184,8 @@ body {
 .track-row {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 12px 14px 12px 18px;
+  gap: 20px;
+  padding: 16px 18px 16px 22px;
   color: inherit;
   text-decoration: none;
   transition: background-color 120ms ease;
@@ -209,7 +209,7 @@ body {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .track-title {
@@ -230,7 +230,7 @@ body {
 .track-side {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
   flex: none;
 }
 
@@ -256,8 +256,8 @@ body {
 @media (max-width: 520px) {
   .track-row {
     align-items: flex-start;
-    gap: 10px;
-    padding-left: 14px;
+    gap: 12px;
+    padding: 14px 16px;
   }
 
   .track-side {
@@ -278,7 +278,7 @@ body {
 .list-end {
   display: flex;
   justify-content: center;
-  padding: 20px 0;
+  padding: 28px 0;
   min-height: 64px;
 }
 
@@ -300,7 +300,7 @@ body {
 
 .track-byline {
   font-size: var(--mantine-font-size-lg);
-  margin-top: 6px;
+  margin-top: 10px;
   color: var(--ink-dim);
 }
 
@@ -323,9 +323,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 10px 0;
-  margin-bottom: 8px;
+  gap: 16px;
+  padding: 14px 0;
+  margin-bottom: 20px;
   background: var(--bg);
   border-bottom: 1px solid var(--hairline);
 }
@@ -336,8 +336,8 @@ body {
 
 .lines {
   --time-width: 0px;
-  font-size: 1.075rem;
-  line-height: 1.55;
+  font-size: 1.125rem;
+  line-height: 1.6;
   outline: none;
   border-radius: var(--mantine-radius-md);
 }
@@ -347,16 +347,16 @@ body {
 }
 
 .lines-timed {
-  --time-width: 5.6rem;
+  --time-width: 6.5rem;
 }
 
 .line {
   display: grid;
   grid-template-columns: var(--time-width) 1fr;
   align-items: baseline;
-  padding: 3px 10px;
-  margin: 0 -10px;
-  border-radius: 8px;
+  padding: 7px 14px;
+  margin: 0 -14px;
+  border-radius: 10px;
   cursor: pointer;
   transition: background-color 90ms ease;
 }
@@ -393,7 +393,7 @@ body {
 
 .line-time {
   font-family: var(--mantine-font-family-monospace);
-  font-size: 0.78rem;
+  font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
   color: var(--ink-faint);
   /* Selecting text copies the words, not the timestamps. */
@@ -418,19 +418,19 @@ body {
 
 /* A blank line of plain lyrics: the gap between verses. */
 .line-gap {
-  min-height: 1em;
+  min-height: 1.25em;
 }
 
 .selection-bar {
   position: sticky;
   bottom: 16px;
   z-index: 20;
-  margin-top: 16px;
+  margin-top: 24px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 8px 8px 8px 16px;
+  gap: 16px;
+  padding: 10px 10px 10px 22px;
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: 999px;
@@ -459,7 +459,7 @@ body {
 
 .lyricsfile {
   margin: 0;
-  padding: 16px;
+  padding: 20px 24px;
   font-family: var(--mantine-font-family-monospace);
   font-size: 0.82rem;
   line-height: 1.6;
@@ -468,4 +468,28 @@ body {
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: var(--mantine-radius-md);
+}
+
+@media (max-width: 520px) {
+  .page {
+    padding: 24px 16px 96px;
+  }
+
+  .header-inner {
+    padding: 0 16px;
+    gap: 12px;
+  }
+
+  .lines {
+    font-size: 1.05rem;
+  }
+
+  .lines-timed {
+    --time-width: 5.2rem;
+  }
+
+  .line {
+    padding: 6px 10px;
+    margin: 0 -10px;
+  }
 }

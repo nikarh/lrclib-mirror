@@ -42,7 +42,7 @@ export const theme = createTheme({
   cursorType: 'pointer',
   focusRing: 'auto',
   components: {
-    Badge: { defaultProps: { radius: 'sm', variant: 'light', size: 'sm' } },
+    Badge: { defaultProps: { radius: 'sm', variant: 'light', size: 'md' } },
     ActionIcon: { defaultProps: { variant: 'subtle', color: 'gray' } },
     Menu: { defaultProps: { radius: 'md', shadow: 'md', position: 'bottom-end' } },
   },

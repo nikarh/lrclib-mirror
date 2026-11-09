@@ -197,9 +197,10 @@ export function LyricsLines({ lines, timed }: { lines: Line[]; timed: boolean })
           <Text size="sm" fw={600} className="selection-count">
             {plural(selected.size, 'line')}
           </Text>
-          <Group gap={6} wrap="nowrap">
+          <Group gap={8} wrap="nowrap">
             <Button
-              size="compact-sm"
+              size="xs"
+              radius="xl"
               leftSection={<IconCopy size={14} />}
               onClick={() => {
                 copy(false)
@@ -209,7 +210,8 @@ export function LyricsLines({ lines, timed }: { lines: Line[]; timed: boolean })
             </Button>
             {timed && (
               <Button
-                size="compact-sm"
+                size="xs"
+                radius="xl"
                 variant="light"
                 onClick={() => {
                   copy(true)
@@ -220,7 +222,8 @@ export function LyricsLines({ lines, timed }: { lines: Line[]; timed: boolean })
             )}
             {selected.size < lines.length && (
               <Button
-                size="compact-sm"
+                size="xs"
+                radius="xl"
                 variant="subtle"
                 color="gray"
                 onClick={() => {

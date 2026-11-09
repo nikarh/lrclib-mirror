@@ -60,11 +60,11 @@ function Actions({ track }: { track: Track }) {
   ] as const
   const any = texts.some((t) => t.text !== null)
   return (
-    <Group gap={6} wrap="nowrap">
+    <Group gap={8} wrap="nowrap">
       <Menu>
         <Menu.Target>
           <Button
-            size="compact-md"
+            size="sm"
             variant="default"
             radius="xl"
             leftSection={<IconCopy size={15} />}
@@ -91,7 +91,7 @@ function Actions({ track }: { track: Track }) {
       <Menu>
         <Menu.Target>
           <Button
-            size="compact-md"
+            size="sm"
             variant="default"
             radius="xl"
             leftSection={<IconDownload size={15} />}
@@ -167,7 +167,7 @@ function Lyrics({ track }: { track: Track }) {
       <div className="lyrics-toolbar">
         {views.length > 1 ? (
           <SegmentedControl
-            size="sm"
+            size="md"
             radius="xl"
             value={view}
             onChange={(v) => {
@@ -265,7 +265,7 @@ export function TrackScreen({ id }: { id: number }) {
           )}
           {t.albumName && <span className="track-album"> · {t.albumName}</span>}
         </Text>
-        <Group gap={8} mt={10} justify="space-between" wrap="wrap">
+        <Group gap={12} mt={20} justify="space-between" wrap="wrap">
           <Group gap={8}>
             <LyricsBadge
               track={{
