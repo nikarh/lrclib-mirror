@@ -1,10 +1,10 @@
 import { Alert, Button, Text, Title } from '@mantine/core'
-import { IconAlertTriangle, IconSearch } from '@tabler/icons-react'
+import { IconAlertTriangle, IconInfoCircle, IconSearch } from '@tabler/icons-react'
 import { useInfiniteQuery } from '@tanstack/react-query'
 import { useCallback } from 'react'
 
 import { search } from '../api'
-import { TrackList, TrackListSkeleton } from '../components/TrackList'
+import { ArtistChips, TrackList, TrackListSkeleton } from '../components/TrackList'
 
 export function SearchScreen({ q }: { q: string }) {
   const query = q.trim()
@@ -77,6 +77,7 @@ export function SearchScreen({ q }: { q: string }) {
 
   return (
     <section aria-label={`Results for ${query}`}>
+      <ArtistChips tracks={tracks} />
       <TrackList
         tracks={tracks}
         hasMore={results.hasNextPage}
@@ -84,6 +85,18 @@ export function SearchScreen({ q }: { q: string }) {
         loadMore={loadMore}
         error={results.isFetchNextPageError ? results.error : null}
       />
+      {results.data.pages[0]?.limited === true && (
+        <Alert
+          variant="light"
+          color="gray"
+          icon={<IconInfoCircle size={18} />}
+          className="limited-note"
+        >
+          Only the first {tracks.length} results: this server is an older lrclib-mirror (or LRCLIB
+          itself), which can’t page through search results or list an artist’s tracks. A newer
+          lrclib-mirror shows them all.
+        </Alert>
+      )}
     </section>
   )
 }

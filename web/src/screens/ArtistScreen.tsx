@@ -39,7 +39,8 @@ export function ArtistScreen({ artist }: { artist: string }) {
 
       {first?.approximate === true && (
         <Alert variant="light" color="gray" icon={<IconInfoCircle size={18} />} mb="md">
-          This server can’t list an artist’s tracks: these are what a search for the name finds.
+          This server is an older lrclib-mirror (or LRCLIB itself), which can’t list an artist’s
+          tracks: these are what a search for the name finds. A newer lrclib-mirror lists them all.
         </Alert>
       )}
 

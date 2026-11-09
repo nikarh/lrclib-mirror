@@ -34,6 +34,8 @@ export interface Page {
   tracks: TrackSummary[]
   /** Whether there may be more after this page. */
   more: boolean
+  /** The server can't page through results (no `/api/mirror/`): these are its first 20 at most. */
+  limited: boolean
 }
 
 export interface ArtistPage extends Page {
@@ -114,15 +116,19 @@ export async function search(q: string, offset: number): Promise<Page> {
             offset,
             limit: PAGE_SIZE,
           })
-          return { tracks, more: tracks.length === PAGE_SIZE }
+          return { tracks, more: tracks.length === PAGE_SIZE, limited: false }
         }
         case 'v2':
-          if (offset > 0) return { tracks: [], more: false }
-          return { tracks: await get<TrackSummary[]>('/api/v2/search', { q }), more: false }
+          if (offset > 0) return { tracks: [], more: false, limited: true }
+          return {
+            tracks: await get<TrackSummary[]>('/api/v2/search', { q }),
+            more: false,
+            limited: true,
+          }
         case 'v1': {
-          if (offset > 0) return { tracks: [], more: false }
+          if (offset > 0) return { tracks: [], more: false, limited: true }
           const tracks = await get<Track[]>('/api/search', { q })
-          return { tracks: tracks.map(summarize), more: false }
+          return { tracks: tracks.map(summarize), more: false, limited: true }
         }
       }
     } catch (e) {
@@ -146,6 +152,7 @@ export async function artistTracks(artist: string, offset: number): Promise<Arti
       return {
         ...page,
         more: offset + page.tracks.length < page.total,
+        limited: false,
         approximate: false,
       }
     } catch (e) {
@@ -154,9 +161,9 @@ export async function artistTracks(artist: string, offset: number): Promise<Arti
     }
   }
   // Without the listing: what a search for the name finds, by this artist.
-  if (offset > 0) return { tracks: [], total: 0, more: false, approximate: true }
+  if (offset > 0) return { tracks: [], total: 0, more: false, limited: true, approximate: true }
   const wanted = artist.trim().toLocaleLowerCase()
   const { tracks } = await search(artist, 0)
   const own = tracks.filter((t) => t.artistName?.trim().toLocaleLowerCase() === wanted)
-  return { tracks: own, total: own.length, more: false, approximate: true }
+  return { tracks: own, total: own.length, more: false, limited: true, approximate: true }
 }
