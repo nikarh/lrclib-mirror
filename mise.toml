@@ -65,9 +65,10 @@ description = "Audit dependencies: advisories, licenses, duplicates, sources"
 run = "cargo deny check"
 
 [tasks.ci]
-description = "What CI's check job runs: lint, tests, that the web search builds, action pins"
-depends = ["lint", "test", "web:build"]
-run = "scripts/check-actions.sh"
+description = "What CI's check job runs: that the web search builds, lint, tests, action pins"
+# The web search first: the Rust build embeds web/dist, which a build running alongside empties and refills.
+depends = ["web:build"]
+run = [{ tasks = ["lint", "test"] }, "scripts/check-actions.sh"]
 
 [tasks.check]
 description = "Everything CI checks"
