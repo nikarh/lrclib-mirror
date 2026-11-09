@@ -1,3 +1,7 @@
 /target
 /ci-rootfs
 /out
+/web/node_modules
+/web/dist
+# Local settings, e.g. LRCLIB_MIRROR_REMOTE for `mise run dev:remote`.
+mise.local.toml

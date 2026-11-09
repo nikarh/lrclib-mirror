@@ -34,8 +34,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
       - name: Install the toolchain
         run: |
           sudo apt-get install -y --no-install-recommends musl-tools
@@ -50,11 +48,11 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.npm
-          key: npm-${{ hashFiles('upstream/lrclib-homepage/package-lock.json') }}
+          key: npm-${{ hashFiles('web/package-lock.json') }}
       - name: Build the static binary with the web search embedded
         run: |
           set -euo pipefail
-          # --version: e.g. 2.0.0+abc1234 (v2), 2.0.0-dev+abc1234 (v2-dev); then the web search's commit
+          # --version: e.g. 2.0.0+abc1234 (v2), 2.0.0-dev+abc1234 (v2-dev)
           export LRCLIB_MIRROR_VERSION_SUFFIX="${TAG#v2}+${GITHUB_SHA:0:7}"
           mise run web:build
           cargo build --locked --release --target "$TARGET" -p lrclib-mirror
@@ -63,9 +61,8 @@ jobs:
 
           mkdir -p out
           cp "$bin" "out/lrclib-mirror-$TARGET"
-          # The MIT notices of the upstream code: the web search, and the server code ported to this crate.
-          cp licenses/LICENSE-lrclib out/LICENSE-lrclib
-          cp upstream/lrclib-homepage/LICENSE out/LICENSE-lrclib-homepage
+          # The MIT notices of LRCLIB's server (ported to this crate) and web search (reimplemented in web/).
+          cp licenses/LICENSE-lrclib licenses/LICENSE-lrclib-homepage out/
 
           root=ci-rootfs
           mkdir -p "$root/etc/ssl/certs"

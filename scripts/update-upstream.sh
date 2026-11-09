@@ -1,79 +1,52 @@
 #!/usr/bin/env bash
-# Moves the web search submodule (lrclib-homepage) to the newest commit of its default branch and updates Cargo.lock,
-# and writes the pull request text to $1 (title on the first line, then the body): the upstream commits since the
-# current one, changelog additions when upstream keeps a changelog, and whether the patches still apply. Exits 3 when
-# nothing changed. Leaves the changes uncommitted.
+# Refreshes the lockfiles within the manifests' ranges (Cargo.lock: `cargo update`; web/package-lock.json:
+# `npm update`) and writes the pull request text to $1 (title on the first line, then the body): what changed in
+# each. Exits 3 when nothing changed. Leaves the changes uncommitted.
 set -euo pipefail
+export LC_ALL=C
 cd "$(dirname "$0")/.."
 out=$1
-
-declare -A old new
-for name in lrclib-homepage; do
-  old[$name]=$(git ls-tree HEAD "upstream/$name" | awk '{print $3}')
-done
-git submodule update --init --remote --checkout upstream/lrclib-homepage
-changed=()
-for name in lrclib-homepage; do
-  new[$name]=$(git -C "upstream/$name" rev-parse HEAD)
-  [[ ${old[$name]} == "${new[$name]}" ]] || changed+=("$name")
-done
 
 # What cargo changed, e.g. "Updating tokio v1.54.1 -> v1.55.0".
 if ! output=$(cargo update 2>&1); then
   echo "$output" >&2
   exit 1
 fi
-lock_report=$(sed -nE 's/^ *((Updating|Adding|Removing|Downgrading) [^ ]+ v.*)/\1/p' <<< "$output")
-lock_changed=false
-git diff --quiet -- Cargo.lock || lock_changed=true
-if (( ${#changed[@]} == 0 )) && ! $lock_changed; then
+cargo_report=$(sed -nE 's/^ *((Updating|Adding|Removing|Downgrading) [^ ]+ v.*)/\1/p' <<< "$output")
+
+# What npm changed: the packages of the lockfile whose version is another (or that came or went).
+versions() { jq -r '.packages | to_entries[] | select(.key != "") | "\(.key | sub("^node_modules/"; "")) \(.value.version)"' web/package-lock.json | sort; }
+before=$(versions)
+if ! output=$(npm --prefix web update --no-audit --no-fund 2>&1); then
+  echo "$output" >&2
+  exit 1
+fi
+npm_report=$(join -a1 -a2 -e - -o 0,1.2,2.2 <(echo "$before") <(versions) |
+  awk '$2 != $3 { print ($2 == "-" ? "Adding " $1 " " $3 : $3 == "-" ? "Removing " $1 " " $2 : "Updating " $1 " " $2 " -> " $3) }')
+
+changed=()
+git diff --quiet -- Cargo.lock || changed+=(Cargo.lock)
+git diff --quiet -- web/package-lock.json || changed+=(web/package-lock.json)
+if (( ${#changed[@]} == 0 )); then
   echo "nothing changed"
   exit 3
 fi
 
-summary=()
-for name in "${changed[@]}"; do summary+=("$name ${new[$name]:0:7}"); done
-$lock_changed && summary+=("Cargo.lock")
 {
-  joined=$(printf '%s, ' "${summary[@]}")
-  echo "build(deps): update upstream (${joined%, })"
-  echo "Upstream changes since the last update. Merging publishes them as \`v2\` and the \`v2\` (\`main\`) image;"
-  echo "until then this branch is built as the \`v2-dev\` pre-release and the \`v2-dev\` (\`dev\`) image."
-  for name in "${changed[@]}"; do
-    repo=https://github.com/tranxuanthang/$name
-    range="${old[$name]}..${new[$name]}"
+  joined=$(printf '%s, ' "${changed[@]}")
+  echo "build(deps): update dependencies (${joined%, })"
+  echo "Dependency updates within the manifests' ranges. Merging publishes them as \`v2\` and the \`v2\` (\`main\`)"
+  echo "image; until then this branch is built as the \`v2-dev\` pre-release and the \`v2-dev\` (\`dev\`) image."
+  for file in "${changed[@]}"; do
     echo
-    echo "## [$name]($repo/compare/${old[$name]:0:12}...${new[$name]:0:12})"
+    echo "## $file"
     echo
-    git -C "upstream/$name" log --reverse --format="- [\`%h\`]($repo/commit/%H) %s" "$range"
-    changelog=$(git -C "upstream/$name" diff --name-only "$range" -- 'CHANGELOG*' 'changelog*' 'CHANGES*' | head -1)
-    if [[ -n $changelog ]]; then
-      echo
-      echo "<details><summary>$changelog</summary>"
-      echo
-      git -C "upstream/$name" diff "$range" -- "$changelog" | sed -n 's/^+\([^+]\)/\1/p; s/^+$//p'
-      echo
-      echo "</details>"
+    echo '```'
+    if [[ $file == Cargo.lock ]]; then
+      echo "$cargo_report"
+    else
+      echo "$npm_report"
     fi
+    echo '```'
   done
-  if $lock_changed; then
-    echo
-    echo "## Cargo.lock"
-    echo
-    echo '```'
-    echo "$lock_report"
-    echo '```'
-  fi
-  echo
-  echo "## Patches"
-  echo
-  if report=$(scripts/patch-upstream.sh --check 2>&1); then
-    echo "All of \`patches/\` still apply."
-  else
-    echo "**Some patches no longer apply**: CI fails until they are updated."
-  fi
-  echo
-  echo '```'
-  echo "$report"
-  echo '```'
 } > "$out"

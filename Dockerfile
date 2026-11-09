@@ -3,25 +3,21 @@
 
 # The web search, built once, natively.
 FROM --platform=$BUILDPLATFORM node:26.13.0-alpine AS web
-RUN apk add --no-cache git bash
-WORKDIR /src
-COPY scripts/patch-upstream.sh scripts/
-COPY patches/lrclib-homepage patches/lrclib-homepage
-COPY upstream/lrclib-homepage upstream/lrclib-homepage
-RUN scripts/patch-upstream.sh
-WORKDIR /src/upstream/lrclib-homepage
-RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund && npm run build
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
 
 # A static musl binary with the web search embedded.
 FROM rust:1.99.1-alpine AS build
-RUN apk add --no-cache musl-dev gcc git bash ca-certificates
+RUN apk add --no-cache musl-dev gcc ca-certificates
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src src
 COPY tools tools
-COPY --from=web /src/upstream/lrclib-homepage/dist upstream/lrclib-homepage/dist
-# The build context has no git metadata: the web search's upstream commit for --version.
-ARG LRCLIB_HOMEPAGE_COMMIT="" LRCLIB_MIRROR_VERSION_SUFFIX=""
+COPY --from=web /src/web/dist web/dist
+ARG LRCLIB_MIRROR_VERSION_SUFFIX=""
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     set -eux; \

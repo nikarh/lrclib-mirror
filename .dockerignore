@@ -1,5 +1,5 @@
 **/.git
 target
 **/node_modules
-upstream/lrclib-homepage/dist
+web/dist
 out

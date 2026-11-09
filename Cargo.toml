@@ -13,8 +13,8 @@ categories = ["web-programming::http-server"]
 
 [workspace]
 members = ["tools/compare"]
-# The web search is a submodule (a node project).
-exclude = ["upstream"]
+# The web search (a node project).
+exclude = ["web"]
 
 [dependencies]
 aho-corasick = "1.1.5"

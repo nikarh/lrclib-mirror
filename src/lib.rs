@@ -13,5 +13,5 @@ pub mod text;
 pub mod web;
 pub mod yaml;
 
-/// The version, and the upstream commit of the web search.
+/// The version.
 pub const VERSION: &str = env!("LRCLIB_MIRROR_VERSION");

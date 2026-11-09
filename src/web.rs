@@ -17,12 +17,16 @@ mod assets {
     include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 }
 
-/// Only the lookups: publishing and flagging lyrics have no place on a copy that the next dump replaces.
+/// Only the lookups: publishing and flagging lyrics have no place on a copy that the next dump replaces. Under
+/// `/api/mirror/` the lookups of the web search that LRCLIB's server doesn't have.
 pub fn router(mirror: Arc<Mirror>) -> Router {
     Router::new()
         .route("/api/get", get(get_by_metadata))
         .route("/api/get/:track_id", get(get_by_track_id))
         .route("/api/search", get(search))
+        .route("/api/v2/search", get(search_v2))
+        .route("/api/mirror/search", get(search_page))
+        .route("/api/mirror/artist", get(artist))
         .route("/healthz", get(|| async { "ok" }))
         .fallback(static_file)
         .layer(
@@ -84,6 +88,27 @@ async fn search(
     Query(params): Query<api::SearchParams>,
 ) -> Response {
     answer(&mirror, move |store| api::search(store, &params)).await
+}
+
+async fn search_v2(
+    State(mirror): State<Arc<Mirror>>,
+    Query(params): Query<api::SearchParams>,
+) -> Response {
+    answer(&mirror, move |store| api::search_v2(store, &params)).await
+}
+
+async fn search_page(
+    State(mirror): State<Arc<Mirror>>,
+    Query(params): Query<api::SearchPageParams>,
+) -> Response {
+    answer(&mirror, move |store| api::search_page(store, &params)).await
+}
+
+async fn artist(
+    State(mirror): State<Arc<Mirror>>,
+    Query(params): Query<api::ArtistParams>,
+) -> Response {
+    answer(&mirror, move |store| api::artist(store, &params)).await
 }
 
 /// The web search (a single page app: unknown paths get `index.html`).

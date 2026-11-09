@@ -1,8 +1,8 @@
 name: Upstream
 
-# Daily: moves the web search submodule (lrclib-homepage) to its newest commit, refreshes Cargo.lock, and opens a pull
-# request with what changed, or updates the one still open. Its branch is built as the `dev` pre-release and image
-# (Dev workflow). Merged, the next update opens a new pull request; when upstream has nothing new, nothing happens.
+# Daily: refreshes Cargo.lock and web/package-lock.json, and opens a pull request with what changed, or updates the one
+# still open. Its branch is built as the `dev` pre-release and image (Dev workflow). Merged, the next update opens a
+# new pull request; when nothing changed, nothing happens.
 on:
   schedule:
     - cron: "17 4 * * *"
@@ -36,12 +36,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
-          submodules: true
           fetch-depth: 0
           token: ${{ steps.generate-token.outputs.token }}
       # For Cargo.lock; the toolchain comes from rust-toolchain.toml.
       - run: rustup toolchain install --profile minimal
-      - name: Update the submodules
+      # For web/package-lock.json.
+      - uses: jdx/mise-action@f5be966e4a917d54244728e6a5fdcd1d93a35e6c # v5.2.6
+        with:
+          install_args: node
+      - name: Update the dependencies
         id: update
         run: |
           set -uo pipefail
@@ -65,7 +68,7 @@ jobs:
           git config user.name "${APP_SLUG}[bot]"
           git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"
-          git add upstream Cargo.lock
+          git add Cargo.lock web/package-lock.json
           git commit -q -m "$title"
           # Always one commit on top of main: an open pull request is replaced, not stacked onto.
           git push --force origin "$BRANCH"

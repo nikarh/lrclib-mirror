@@ -184,15 +184,32 @@ impl Search {
         artist_name: Option<&str>,
         album_name: Option<&str>,
     ) -> tantivy::Result<Vec<i64>> {
+        self.page(q, track_name, artist_name, album_name, 0, LIMIT)
+    }
+
+    /// [`Self::search`], `limit` results from `offset` on (not something LRCLIB's server does: for the web search).
+    pub fn page(
+        &self,
+        q: Option<&str>,
+        track_name: Option<&str>,
+        artist_name: Option<&str>,
+        album_name: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> tantivy::Result<Vec<i64>> {
         let Some(query) = self.query(q, track_name, artist_name, album_name) else {
             return Ok(Vec::new());
         };
-        self.top(&*query)
-    }
-
-    fn top(&self, query: &dyn Query) -> tantivy::Result<Vec<i64>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let searcher = self.reader.searcher();
-        let top = searcher.search(query, &TopDocs::with_limit(LIMIT).order_by_score())?;
+        let top = searcher.search(
+            &*query,
+            &TopDocs::with_limit(limit)
+                .and_offset(offset)
+                .order_by_score(),
+        )?;
         let mut ids = Vec::with_capacity(top.len());
         for (_, address) in top {
             let column = searcher
@@ -361,6 +378,15 @@ mod tests {
         );
         assert_eq!(
             s.search(Some(" "), None, None, None).unwrap(),
+            Vec::<i64>::new()
+        );
+        // Pages follow the ranking.
+        let all = s.search(Some("hello"), None, None, None).unwrap();
+        let mut paged = s.page(Some("hello"), None, None, None, 0, 2).unwrap();
+        paged.extend(s.page(Some("hello"), None, None, None, 2, 2).unwrap());
+        assert_eq!(paged, all);
+        assert_eq!(
+            s.page(Some("hello"), None, None, None, 3, 2).unwrap(),
             Vec::<i64>::new()
         );
         assert!(

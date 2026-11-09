@@ -11,10 +11,35 @@ millisecond.
 
 - `GET /api/get`, `GET /api/get/{id}`, `GET /api/search` answer exactly as on lrclib.net (same bodies, statuses and
   errors; search ranks the same). Publishing and flagging lyrics are left out: the next dump replaces the copy.
-- The web search is [tranxuanthang/lrclib-homepage](https://github.com/tranxuanthang/lrclib-homepage) (the lrclib.net
-  page, reduced to the search and the lyrics view, asking the local API), a git submodule changed only by the patch
-  in `patches/`.
+- `GET /api/v2/search`, the search of lrclib.net's own web page, finds the same tracks as `/api/search` but answers
+  without their lyrics, saying which there are (`hasPlainLyrics`, `hasSyncedLyrics`, `hasLyricsfile`).
+- For the web search, two lookups lrclib.net doesn't have, answering tracks as `/api/v2/search` does:
+  `GET /api/mirror/search` takes `/api/search`'s parameters and `offset` and `limit` (1 to 100, 20 by default) and
+  pages through the same ranking past its first 20; `GET /api/mirror/artist?artist_name=` lists the tracks of an
+  artist (matched as `/api/get` matches it) by name, as `{"total": n, "tracks": [...]}`, also with `offset` and
+  `limit`.
+- A [web search](#web-search), built into the binary, at `/`.
 - Dumps are checked for daily; a newer one is imported in the background and switched to without a restart.
+
+## Web search
+
+The page at `/` (`web/`, a React app embedded in the binary) searches the local copy. It follows the web search of
+lrclib.net ([tranxuanthang/lrclib-homepage](https://github.com/tranxuanthang/lrclib-homepage)), reimplemented, with
+more for going through many tracks:
+
+- **Search** by song, artist or album as you type (`/` focuses the search box from anywhere). Results keep loading as
+  the list scrolls. Each row opens the track's lyrics, and since it is a link, also in a new tab. Back and forward
+  return to where a list was scrolled to.
+- **Artists**: the artist's name in a result row or on a track, and the artists most found among the results, open
+  all of the artist's tracks, by title.
+- **Lyrics**: synced, plain or Lyricsfile. Synced lyrics show their timestamps beside the lines and are set apart
+  into verses as the plain lyrics are. Lines are picked by clicking them (shift-click: a range; or the keyboard:
+  arrows, space, Ctrl+A, Ctrl+C, Esc) and copied together as text or as LRC; selecting text by dragging leaves the
+  timestamps out.
+- A track's plain lyrics, LRC and Lyricsfile can be copied or saved as files.
+
+Against a server without `/api/mirror/` (an older lrclib-mirror) it falls back to `/api/v2/search` or `/api/search`
+and says so: one page of results, and an artist's tracks only as far as a search for the name finds them.
 
 ## How 271 GB become 9.3
 
@@ -103,8 +128,7 @@ updated: the `ghcr.io/nikarh/lrclib-mirror:v1` image (and `:v1-dev`, `:sha-<comm
 [`legacy-sqlite`](https://github.com/nikarh/lrclib-mirror/tree/legacy-sqlite) branch. Its data directory isn't
 used by this version (`dumps/*.sqlite3` and `search-index/` can be removed once a store is imported).
 
-The image is `FROM scratch` (a static x86_64 musl binary and CA certificates). `lrclib-mirror --version` names the
-web search's upstream commit it was built from.
+The image is `FROM scratch` (a static x86_64 musl binary and CA certificates).
 
 ## Usage
 
@@ -201,13 +225,20 @@ The key is `46D28A16740135310E5676BCCEA1A710FEC72835` (ed25519, expires 2029-11-
 
 [mise](https://mise.jdx.dev) installs the tools; `mise run check` runs everything CI does, `mise run build` builds the
 binary with the web search, `mise run docker` the image, `mise run compare` compares with LRCLIB's server.
-`mise run patch` applies `patches/` to the web search submodule (clone with `--recursive`, or
-`git submodule update --init`).
+`mise run web:dev` runs the web search's dev server (http://localhost:5173) against the server of `mise run dev`;
+`mise run dev:remote` against another lrclib-mirror, named by `LRCLIB_MIRROR_REMOTE` (e.g. in `mise.local.toml`,
+which git ignores):
+
+```toml
+[env]
+LRCLIB_MIRROR_REMOTE = "https://lrclib.example"
+```
 
 ## License
 
 This project's own code is MIT or Apache-2.0, at your option. Parts of it are ported from LRCLIB's server
 ([tranxuanthang/lrclib](https://github.com/tranxuanthang/lrclib), MIT): the name normalization, the Lyricsfile and
 LRC handling, the search queries and the API's behavior; its license is `licenses/LICENSE-lrclib`. The web search
-is MIT licensed by its author, and so is the change to it in `patches/`. Both license texts come with the release
-files (`LICENSE-lrclib*`). The LRCLIB database is LRCLIB's.
+reimplements LRCLIB's web search ([tranxuanthang/lrclib-homepage](https://github.com/tranxuanthang/lrclib-homepage),
+MIT); its license is `licenses/LICENSE-lrclib-homepage`. Both license texts come with the release files
+(`LICENSE-lrclib*`). The LRCLIB database is LRCLIB's.

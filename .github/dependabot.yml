@@ -1,6 +1,6 @@
 version: 2
-# Cargo.lock is updated by the daily Upstream workflow (`cargo update`): Dependabot doesn't fetch the submodule that
-# the server crate comes from. The frontend's package-lock.json is upstream's.
+# Cargo.lock and web/package-lock.json are refreshed within the manifests' ranges by the daily Upstream workflow
+# (`cargo update`, `npm update`); new major versions are added by hand.
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
