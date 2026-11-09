@@ -78,4 +78,4 @@ strip = true
 panic = "abort"
 
 [dev-dependencies]
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
