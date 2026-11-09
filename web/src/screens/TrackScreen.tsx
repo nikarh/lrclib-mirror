@@ -14,7 +14,7 @@ import { ApiError, type Track, getTrack } from '../api'
 import { copyAndTell, download } from '../clipboard'
 import { LyricsLines } from '../components/LyricsLines'
 import { LyricsBadge } from '../components/TrackList'
-import { duration, parseLrc, plainLines } from '../lyrics'
+import { duration, parseLrc, plainLines, withParagraphs } from '../lyrics'
 import { Link } from '../components/Link'
 import { href } from '../router'
 
@@ -144,7 +144,7 @@ function Lyrics({ track }: { track: Track }) {
   const lines = useMemo(
     () =>
       view === 'synced'
-        ? parseLrc(track.syncedLyrics ?? '')
+        ? withParagraphs(parseLrc(track.syncedLyrics ?? ''), track.plainLyrics)
         : view === 'plain'
           ? plainLines(track.plainLyrics ?? '')
           : [],

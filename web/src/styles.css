@@ -496,6 +496,20 @@ body {
   -webkit-user-select: none;
 }
 
+/* The first line of a verse of synced lyrics: the gap a blank line makes in plain ones. */
+.line-para {
+  margin-top: 1.1em;
+}
+
+/* An instrumental part: between the verses, with room on both sides. */
+.line-break:not(:first-child) {
+  margin-block: 0.55em;
+}
+
+.line-break + .line-para {
+  margin-top: 0.55em;
+}
+
 /* A blank line of plain lyrics: the gap between verses. */
 .line-gap {
   min-height: 1.25em;

@@ -175,6 +175,7 @@ export function LyricsLines({ lines, timed }: { lines: Line[]; timed: boolean })
           const classes = ['line']
           if (selected.has(i)) classes.push('line-selected')
           if (active === i) classes.push('line-active')
+          if (line.para === true) classes.push('line-para')
           if (blank) classes.push(line.time === null ? 'line-gap' : 'line-break')
           return (
             <div

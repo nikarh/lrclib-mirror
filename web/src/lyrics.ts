@@ -6,6 +6,8 @@ export interface Line {
   /** The timestamp as written (`01:02.50`), for copying it back as it was. */
   stamp: string | null
   text: string
+  /** The line starts a verse or chorus: a gap above it. */
+  para?: boolean
 }
 
 const TIMESTAMP = /^\[(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)\]/
@@ -71,9 +73,97 @@ export function duration(seconds: number | null) {
     : `${String(minutes)}:${pad(s % 60)}`
 }
 
-/** The lines as text, or as LRC (their timestamps as written) when `lrc` is set. */
+const comparable = (text: string) =>
+  text
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+
+/**
+ * Where the verses of synced lyrics start: where the plain lyrics have a blank line, when they are the same lines
+ * (they usually are); otherwise after an empty timed line or a long pause.
+ */
+export function withParagraphs(synced: Line[], plain: string | null): Line[] {
+  const fromPlain = plain === null ? null : paragraphsFromPlain(synced, plain)
+  const starts = fromPlain ?? paragraphsFromTiming(synced)
+  return synced.map((line, i) => (starts.has(i) ? { ...line, para: true } : line))
+}
+
+function paragraphsFromPlain(synced: Line[], plain: string): Set<number> | null {
+  const rows = plain.replace(/\r\n?/g, '\n').split('\n').map(comparable)
+  const starts = new Set<number>()
+  let j = 0
+  let matched = 0
+  let words = 0
+  for (const [i, line] of synced.entries()) {
+    const text = comparable(line.text)
+    if (text === '') continue
+    words++
+    // The line among the next plain ones (looking past a few that differ).
+    let found = -1
+    for (let k = j, seen = 0; k < rows.length && seen < 4; k++) {
+      if (rows[k] === text) {
+        found = k
+        break
+      }
+      if (rows[k] !== '') seen++
+    }
+    if (found === -1) continue
+    // A blank line between it and the line matched before: a new verse.
+    if (matched > 0 && rows.slice(j, found).includes('')) starts.add(i)
+    matched++
+    j = found + 1
+  }
+  // Other lines than the synced ones: their blank lines say nothing about these.
+  return words > 0 && matched / words >= 0.8 ? starts : null
+}
+
+function paragraphsFromTiming(lines: Line[]): Set<number> {
+  const starts = new Set<number>()
+  const gaps: number[] = []
+  for (let i = 1; i < lines.length; i++) {
+    const a = lines[i - 1]?.time
+    const b = lines[i]?.time
+    if (a != null && b != null && b > a) gaps.push(b - a)
+  }
+  const sorted = [...gaps].sort((x, y) => x - y)
+  const median = sorted[Math.floor(sorted.length / 2)] ?? 0
+  // A pause clearly longer than the usual line.
+  const pause = Math.max(median * 2.2, median + 3500)
+  let afterBreak = false
+  for (const [i, line] of lines.entries()) {
+    const prev = lines[i - 1]
+    if (line.text.trim() === '') {
+      afterBreak = true
+      continue
+    }
+    const long =
+      prev?.time != null && line.time !== null && median > 0 && line.time - prev.time > pause
+    if (i > 0 && (afterBreak || long)) starts.add(i)
+    afterBreak = false
+  }
+  return starts
+}
+
+/**
+ * The lines as text (a blank line between verses), or as LRC (their timestamps as written) when `lrc` is set.
+ */
 export function linesText(lines: readonly Line[], lrc: boolean) {
-  return lines
-    .map((l) => (lrc && l.stamp !== null ? `[${l.stamp}] ${l.text}`.trimEnd() : l.text))
-    .join('\n')
+  if (lrc) {
+    return lines
+      .map((l) => (l.stamp !== null ? `[${l.stamp}] ${l.text}`.trimEnd() : l.text))
+      .join('\n')
+  }
+  const out: string[] = []
+  for (const l of lines) {
+    if (l.para === true && out.length > 0 && out.at(-1) !== '') out.push('')
+    // An empty timed line (an instrumental part) is a verse break too.
+    if (l.stamp !== null && l.text === '') {
+      if (out.length > 0 && out.at(-1) !== '') out.push('')
+      continue
+    }
+    out.push(l.text)
+  }
+  while (out.at(-1) === '') out.pop()
+  return out.join('\n')
 }
