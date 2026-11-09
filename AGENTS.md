@@ -32,8 +32,10 @@ conditions, and what changed. Never frame them around a particular deployment, a
 
 - The API answers exactly as LRCLIB's server does (bodies, statuses, errors). A change to what it answers, or to
   what the store leaves out and computes back, is checked with `tools/compare` against LRCLIB's server on a dump.
-- The API stays read-only: only the lookups (`/api/get`, `/api/get/{id}`, `/api/search`), never publish, challenge
-  or flag.
+  `/api/v2/search` (lrclib.net's web search, not in LRCLIB's published code) is checked against lrclib.net.
+- The API stays read-only: only the lookups (`/api/get`, `/api/get/{id}`, `/api/search`, `/api/v2/search`), never
+  publish, challenge or flag. What the web search needs and LRCLIB's server lacks goes under `/api/mirror/`, leaving
+  the LRCLIB routes as they are.
 - Reads allocate as little as possible: blocks go into per-thread buffers, records are borrowed views.
 - A change to the store format bumps `FORMAT_VERSION`; a change to how left-out text is computed back (normalization,
   LRC, Lyricsfile YAML) bumps the `VERSION` in `store::derivations`. Stores of another version are imported again.

@@ -31,7 +31,7 @@ pub use import::{
     ImportError, ImportOptions, ImportStats, default_memory, dump_read, finished_store, import,
     is_import, memory_limit,
 };
-pub use read::{Scratch, Store, StoreError, with_scratch};
+pub use read::{BlockBuf, LyricsFlags, Scratch, Store, StoreError, Track, with_scratch};
 
 use std::path::Path;
 

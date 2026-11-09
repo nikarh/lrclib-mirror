@@ -11,6 +11,13 @@ millisecond.
 
 - `GET /api/get`, `GET /api/get/{id}`, `GET /api/search` answer exactly as on lrclib.net (same bodies, statuses and
   errors; search ranks the same). Publishing and flagging lyrics are left out: the next dump replaces the copy.
+- `GET /api/v2/search`, the search of lrclib.net's own web page, finds the same tracks as `/api/search` but answers
+  without their lyrics, saying which there are (`hasPlainLyrics`, `hasSyncedLyrics`, `hasLyricsfile`).
+- For the web search, two lookups lrclib.net doesn't have, answering tracks as `/api/v2/search` does:
+  `GET /api/mirror/search` takes `/api/search`'s parameters and `offset` and `limit` (1 to 100, 20 by default) and
+  pages through the same ranking past its first 20; `GET /api/mirror/artist?artist_name=` lists the tracks of an
+  artist (matched as `/api/get` matches it) by name, as `{"total": n, "tracks": [...]}`, also with `offset` and
+  `limit`.
 - The web search is [tranxuanthang/lrclib-homepage](https://github.com/tranxuanthang/lrclib-homepage) (the lrclib.net
   page, reduced to the search and the lyrics view, asking the local API), a git submodule changed only by the patch
   in `patches/`.

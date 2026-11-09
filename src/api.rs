@@ -1,5 +1,7 @@
-//! LRCLIB's lookup API, answered from the store: `GET /api/get`, `GET /api/get/{id}` and `GET /api/search`, with
-//! the parameters, response bodies and errors of LRCLIB's server.
+//! LRCLIB's lookup API, answered from the store: `GET /api/get`, `GET /api/get/{id}`, `GET /api/search` and
+//! `GET /api/v2/search` (the search of LRCLIB's web client: tracks without their lyrics), with the parameters,
+//! response bodies and errors of LRCLIB's server. And for the web search, what LRCLIB's server doesn't have:
+//! `GET /api/mirror/search` (pages of search results) and `GET /api/mirror/artist` (an artist's tracks).
 //!
 //! The behavior is that of LRCLIB (<https://github.com/tranxuanthang/lrclib>, MIT, Copyright (c) 2024
 //! tranxuanthang): `server/src/routes/*.rs`, `server/src/repositories/track_repository.rs`, `server/src/errors.rs`.
@@ -12,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::store::{Scratch, Store, StoreError, with_scratch};
-use crate::text::normalize_param;
+use crate::text::{normalize, normalize_param};
 
 #[derive(Deserialize)]
 pub struct GetParams {
@@ -30,6 +32,32 @@ pub struct SearchParams {
     album_name: Option<String>,
 }
 
+/// `GET /api/mirror/search`: [`SearchParams`] and a page. (Not `#[serde(flatten)]`: query strings would then only
+/// deserialize into strings.)
+#[derive(Deserialize)]
+pub struct SearchPageParams {
+    q: Option<String>,
+    track_name: Option<String>,
+    artist_name: Option<String>,
+    album_name: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+/// `GET /api/mirror/artist`.
+#[derive(Deserialize)]
+pub struct ArtistParams {
+    artist_name: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+/// Results per page of the web search's own lookups, by default and at most.
+pub const PAGE_LIMIT: usize = 20;
+pub const MAX_PAGE_LIMIT: usize = 100;
+/// How deep the search results can be paged.
+pub const MAX_SEARCH_OFFSET: usize = 10_000;
+
 /// A response body, borrowing from the store's buffers.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +73,23 @@ struct TrackResponse<'a> {
     plain_lyrics: Option<Cow<'a, str>>,
     synced_lyrics: Option<Cow<'a, str>>,
     lyricsfile: Option<Cow<'a, str>>,
+}
+
+/// A track without its lyrics, saying which it has (`GET /api/v2/search`).
+#[derive(Serialize)]
+#[allow(clippy::struct_excessive_bools)] // the body's fields
+#[serde(rename_all = "camelCase")]
+struct TrackSummary<'a> {
+    id: i64,
+    track_name: Option<&'a str>,
+    artist_name: Option<&'a str>,
+    album_name: Option<&'a str>,
+    duration: Option<f64>,
+    instrumental: bool,
+    has_word_sync: bool,
+    has_plain_lyrics: bool,
+    has_synced_lyrics: bool,
+    has_lyricsfile: bool,
 }
 
 #[derive(Serialize)]
@@ -101,6 +146,13 @@ impl IntoResponse for ApiError {
 /// A JSON body.
 pub struct JsonBody(Vec<u8>);
 
+impl JsonBody {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 impl IntoResponse for JsonBody {
     fn into_response(self) -> Response {
         (
@@ -145,6 +197,65 @@ fn write_track(
         lyricsfile: lyrics.lyricsfile,
     };
     serde_json::to_writer(out, &body).map_err(|e| ApiError::Unknown(e.to_string()))
+}
+
+/// Writes the track with this ordinal to `out` as JSON, without its lyrics; an error when LRCLIB's server couldn't
+/// read it.
+fn write_summary(
+    store: &Store,
+    ordinal: u32,
+    scratch: &mut Scratch,
+    out: &mut Vec<u8>,
+) -> Result<(), ApiError> {
+    let Scratch { tracks, lyrics } = scratch;
+    let track = store.track(ordinal, tracks)?;
+    if track.broken {
+        return Err(ApiError::Unknown(format!(
+            "track {} can't be read",
+            track.id
+        )));
+    }
+    let flags = store.lyrics_flags(ordinal, lyrics)?;
+    let body = TrackSummary {
+        id: i64::from(track.id),
+        track_name: track.name,
+        artist_name: track.artist,
+        album_name: track.album,
+        duration: track.duration,
+        instrumental: flags.instrumental,
+        has_word_sync: flags.word_sync,
+        has_plain_lyrics: flags.plain,
+        has_synced_lyrics: flags.synced,
+        has_lyricsfile: flags.lyricsfile,
+    };
+    serde_json::to_writer(out, &body).map_err(|e| ApiError::Unknown(e.to_string()))
+}
+
+/// The tracks with these ids as a JSON array, written by `write` (a track the store doesn't have is left out, as
+/// LRCLIB's server does).
+fn write_tracks(
+    store: &Store,
+    ids: &[i64],
+    write: fn(&Store, u32, &mut Scratch, &mut Vec<u8>) -> Result<(), ApiError>,
+    out: &mut Vec<u8>,
+) -> Result<(), ApiError> {
+    out.push(b'[');
+    with_scratch(|scratch| {
+        let mut first = true;
+        for &id in ids {
+            let Some(ordinal) = store.ordinal(id)? else {
+                continue;
+            };
+            if !first {
+                out.push(b',');
+            }
+            first = false;
+            write(store, ordinal, scratch, out)?;
+        }
+        Ok::<(), ApiError>(())
+    })?;
+    out.push(b']');
+    Ok(())
 }
 
 /// A single track as the body.
@@ -201,37 +312,115 @@ pub fn get_by_id(store: &Store, id: i64) -> Result<JsonBody, ApiError> {
     with_scratch(|scratch| track_body(store, ordinal, scratch))
 }
 
-pub fn search(store: &Store, params: &SearchParams) -> Result<JsonBody, ApiError> {
+/// The ids of the tracks a search finds, best first: `limit` of them from `offset` on.
+fn search_ids(
+    store: &Store,
+    params: &SearchParams,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<i64>, ApiError> {
     let q = normalize_param(params.q.as_deref());
     let track_name = normalize_param(params.track_name.as_deref());
     let artist_name = normalize_param(params.artist_name.as_deref());
     let album_name = normalize_param(params.album_name.as_deref());
-    let ids = store
+    store
         .search
-        .search(
+        .page(
             q.as_deref(),
             track_name.as_deref(),
             artist_name.as_deref(),
             album_name.as_deref(),
+            offset,
+            limit,
         )
-        .map_err(|e| ApiError::Unknown(e.to_string()))?;
+        .map_err(|e| ApiError::Unknown(e.to_string()))
+}
+
+pub fn search(store: &Store, params: &SearchParams) -> Result<JsonBody, ApiError> {
+    let ids = search_ids(store, params, 0, crate::search::LIMIT)?;
     let mut out = Vec::with_capacity(ids.len() * (6 << 10) + 2);
-    out.push(b'[');
+    write_tracks(store, &ids, write_track, &mut out)?;
+    Ok(JsonBody(out))
+}
+
+/// `GET /api/v2/search`: the tracks `GET /api/search` finds, without their lyrics.
+pub fn search_v2(store: &Store, params: &SearchParams) -> Result<JsonBody, ApiError> {
+    let ids = search_ids(store, params, 0, crate::search::LIMIT)?;
+    let mut out = Vec::with_capacity(ids.len() * 256 + 2);
+    write_tracks(store, &ids, write_summary, &mut out)?;
+    Ok(JsonBody(out))
+}
+
+/// The page asked for: `(offset, limit)`.
+fn page(
+    offset: Option<usize>,
+    limit: Option<usize>,
+    max_offset: usize,
+) -> Result<(usize, usize), ApiError> {
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(PAGE_LIMIT);
+    let mut errors = Vec::new();
+    if offset > max_offset {
+        errors.push(format!("offset: must be at most {max_offset}"));
+    }
+    if !(1..=MAX_PAGE_LIMIT).contains(&limit) {
+        errors.push(format!("limit: must be between 1 and {MAX_PAGE_LIMIT}"));
+    }
+    if errors.is_empty() {
+        Ok((offset, limit))
+    } else {
+        Err(ApiError::Validation(errors.join("\n")))
+    }
+}
+
+/// `GET /api/mirror/search`: a page of what `GET /api/v2/search` answers, ranked the same, `limit` tracks from
+/// `offset` on. Fewer than `limit` tracks: the last page.
+pub fn search_page(store: &Store, params: &SearchPageParams) -> Result<JsonBody, ApiError> {
+    let (offset, limit) = page(params.offset, params.limit, MAX_SEARCH_OFFSET)?;
+    let search = SearchParams {
+        q: params.q.clone(),
+        track_name: params.track_name.clone(),
+        artist_name: params.artist_name.clone(),
+        album_name: params.album_name.clone(),
+    };
+    let ids = search_ids(store, &search, offset, limit)?;
+    let mut out = Vec::with_capacity(ids.len() * 256 + 2);
+    write_tracks(store, &ids, write_summary, &mut out)?;
+    Ok(JsonBody(out))
+}
+
+/// `GET /api/mirror/artist`: the tracks of the artist with this name (once normalized, as `GET /api/get` matches
+/// it), by name, album and id, as `{"total": n, "tracks": [...]}` with `limit` tracks from `offset` on.
+pub fn artist(store: &Store, params: &ArtistParams) -> Result<JsonBody, ApiError> {
+    let (offset, limit) = page(params.offset, params.limit, usize::MAX)?;
+    let Some(artist) = normalize_param(Some(&params.artist_name)) else {
+        return Err(ApiError::Validation(
+            "artist_name: cannot be empty".to_owned(),
+        ));
+    };
     with_scratch(|scratch| {
-        let mut first = true;
-        for id in ids {
-            // A track the index has and the store doesn't is left out, as LRCLIB's server does.
-            let Some(ordinal) = store.ordinal(id)? else {
-                continue;
-            };
-            if !first {
+        let mut tracks: Vec<(String, String, u32, u32)> = Vec::new();
+        store.for_artist(&artist, &mut scratch.tracks, |ordinal, track| {
+            // Tracks LRCLIB's server can't read aren't listed.
+            if !track.broken {
+                tracks.push((
+                    normalize(track.name.unwrap_or_default()),
+                    normalize(track.album.unwrap_or_default()),
+                    track.id,
+                    ordinal,
+                ));
+            }
+        })?;
+        tracks.sort_unstable();
+        let mut out = Vec::with_capacity(limit.min(tracks.len()) * 256 + 32);
+        out.extend_from_slice(format!("{{\"total\":{},\"tracks\":[", tracks.len()).as_bytes());
+        for (i, (_, _, _, ordinal)) in tracks.iter().skip(offset).take(limit).enumerate() {
+            if i > 0 {
                 out.push(b',');
             }
-            first = false;
-            write_track(store, ordinal, scratch, &mut out)?;
+            write_summary(store, *ordinal, scratch, &mut out)?;
         }
-        Ok::<(), ApiError>(())
-    })?;
-    out.push(b']');
-    Ok(JsonBody(out))
+        out.extend_from_slice(b"]}");
+        Ok(JsonBody(out))
+    })
 }

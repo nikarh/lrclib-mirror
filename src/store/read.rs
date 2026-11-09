@@ -101,6 +101,17 @@ pub struct Lyrics<'a> {
     pub word_sync: bool,
 }
 
+/// Which lyrics a track has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)] // independent flags
+pub struct LyricsFlags {
+    pub plain: bool,
+    pub synced: bool,
+    pub lyricsfile: bool,
+    pub instrumental: bool,
+    pub word_sync: bool,
+}
+
 /// Buffers for reading one block: compressed and decompressed, and the zstd context. Reused from one request to
 /// the next.
 pub struct BlockBuf {
@@ -355,6 +366,37 @@ impl Store {
         track: &Track<'_>,
         buf: &'s mut BlockBuf,
     ) -> Result<Lyrics<'s>, StoreError> {
+        let entry = self.lyrics_entry(ordinal, buf)?;
+        decode_lyrics(entry, track).ok_or_else(|| self.corrupt(LYRICS, "entry"))
+    }
+
+    /// Which lyrics the track with this ordinal has, without computing any of them back: a text left out is only
+    /// stored as such when it computes back.
+    pub fn lyrics_flags(
+        &self,
+        ordinal: u32,
+        buf: &mut BlockBuf,
+    ) -> Result<LyricsFlags, StoreError> {
+        let entry = self.lyrics_entry(ordinal, buf)?;
+        let flags = Reader::new(entry)
+            .varint()
+            .and_then(|f| u32::try_from(f).ok())
+            .ok_or_else(|| self.corrupt(LYRICS, "entry"))?;
+        Ok(LyricsFlags {
+            plain: (flags >> L_PLAIN_SHIFT) & 3 != mode::NULL,
+            synced: (flags >> L_SYNCED_SHIFT) & 3 != mode::NULL,
+            lyricsfile: (flags >> L_LF_SHIFT) & 3 != mode::NULL,
+            instrumental: flags & L_INSTRUMENTAL != 0,
+            word_sync: flags & L_WORD_SYNC != 0,
+        })
+    }
+
+    /// The encoded lyrics entry of the track with this ordinal, in `buf`.
+    fn lyrics_entry<'s>(
+        &self,
+        ordinal: u32,
+        buf: &'s mut BlockBuf,
+    ) -> Result<&'s [u8], StoreError> {
         let b = self
             .lyrics_blocks
             .partition_point(|x| x.ordinal <= ordinal)
@@ -378,7 +420,54 @@ impl Store {
             r.bytes(n).ok_or_else(corrupt)?;
         }
         let n = usize::try_from(r.varint().ok_or_else(corrupt)?).map_err(|_| corrupt())?;
-        decode_lyrics(r.bytes(n).ok_or_else(corrupt)?, track).ok_or_else(corrupt)
+        r.bytes(n).ok_or_else(corrupt)
+    }
+
+    /// Calls `f` with the ordinal and the record of every track whose normalized artist is `artist`, in the store's
+    /// order (an artist's tracks are next to each other).
+    pub fn for_artist(
+        &self,
+        artist: &str,
+        buf: &mut BlockBuf,
+        mut f: impl FnMut(u32, &Track<'_>),
+    ) -> Result<(), StoreError> {
+        let from = sort_key(Some(artist), None) & !0xffff_ffff;
+        let to = from | 0xffff_ffff;
+        let blocks = self.track_blocks.len().saturating_sub(1);
+        let mut b = self
+            .track_blocks
+            .get(..blocks)
+            .unwrap_or_default()
+            .partition_point(|x| x.key < from)
+            .saturating_sub(1);
+        while b < blocks && self.track_blocks.get(b).is_some_and(|x| x.key <= to) {
+            let first = self.track_blocks.get(b).map_or(0, |x| x.ordinal);
+            self.load_track_block(b, buf)?;
+            let block =
+                TrackBlockView::new(&buf.raw).ok_or_else(|| self.corrupt(TRACKS, "block"))?;
+            let Some(start) = (0..block.len()).find(|&i| block.key(i) >= from) else {
+                b += 1;
+                continue;
+            };
+            let mut past = false;
+            for (i, record) in block.records().enumerate().skip(start) {
+                if block.key(i) > to {
+                    past = true;
+                    break;
+                }
+                let track = record.ok_or_else(|| self.corrupt(TRACKS, "record"))?;
+                // Another artist whose name hashes the same.
+                if track.lower_is(1, artist) {
+                    #[allow(clippy::cast_possible_truncation)] // < TRACKS_PER_BLOCK
+                    f(first + i as u32, &track);
+                }
+            }
+            if past {
+                break;
+            }
+            b += 1;
+        }
+        Ok(())
     }
 
     /// The ordinal of the track LRCLIB's `GET /api/get` finds: the one with the lowest id among those with this

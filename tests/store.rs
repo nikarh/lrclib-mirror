@@ -14,7 +14,9 @@ mod common;
 use common::{build_db, tmp};
 use std::sync::atomic::AtomicBool;
 
+use lrclib_mirror::api;
 use lrclib_mirror::store::{ImportOptions, Store, import, with_scratch};
+use lrclib_mirror::text::normalize;
 use rusqlite::{Connection, OptionalExtension as _};
 
 /// What LRCLIB's server answers for a track (`None`: an error).
@@ -53,6 +55,11 @@ fn oracle(
         },
     )
     .ok()
+}
+
+/// Request parameters from JSON.
+fn params<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> T {
+    serde_json::from_value(v).unwrap()
 }
 
 #[test]
@@ -108,6 +115,19 @@ fn imports_and_answers_like_lrclib() {
                 return;
             };
             assert!(!track.broken);
+            // Which lyrics there are, without computing them back.
+            let flags = store.lyrics_flags(ordinal, &mut s.lyrics).unwrap();
+            assert_eq!(
+                (
+                    flags.plain,
+                    flags.synced,
+                    flags.lyricsfile,
+                    flags.instrumental,
+                    flags.word_sync
+                ),
+                (e.6.is_some(), e.7.is_some(), e.8.is_some(), e.4, e.5),
+                "track {id}"
+            );
             let lyrics = store.lyrics(ordinal, &track, &mut s.lyrics).unwrap();
             let got = (
                 track.name.map(str::to_owned),
@@ -179,6 +199,132 @@ fn imports_and_answers_like_lrclib() {
         }
     }
     assert!(checked > 10_000);
+
+    // An artist's tracks: those with its normalized name.
+    let artists: Vec<String> = conn
+        .prepare(
+            "SELECT DISTINCT artist_name_lower FROM tracks WHERE artist_name_lower IS NOT NULL",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(artists.len() > 10);
+    for artist in artists {
+        let mut expected: Vec<i64> = conn
+            .prepare("SELECT id FROM tracks WHERE artist_name_lower = ?")
+            .unwrap()
+            .query_map([&artist], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        expected.sort_unstable();
+        let mut got = Vec::new();
+        with_scratch(|s| {
+            store
+                .for_artist(&artist, &mut s.tracks, |_, track| {
+                    got.push(i64::from(track.id));
+                })
+                .unwrap();
+        });
+        got.sort_unstable();
+        assert_eq!(got, expected, "{artist:?}");
+    }
+
+    // The web search's lookups.
+    let json = |body: Result<api::JsonBody, api::ApiError>| -> serde_json::Value {
+        serde_json::from_slice(body.unwrap().as_bytes()).unwrap()
+    };
+    let ids = |v: &serde_json::Value| -> Vec<i64> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_i64().unwrap())
+            .collect()
+    };
+    let query = serde_json::json!({"track_name": "love", "artist_name": "prolific artist"});
+    let v1 = json(api::search(&store, &params(query.clone())));
+    let v2 = json(api::search_v2(&store, &params(query.clone())));
+    assert_eq!(ids(&v2), ids(&v1));
+    for (full, summary) in v1.as_array().unwrap().iter().zip(v2.as_array().unwrap()) {
+        let keys: Vec<&str> = summary
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        // (serde_json's map sorts the keys.)
+        assert_eq!(
+            keys,
+            [
+                "albumName",
+                "artistName",
+                "duration",
+                "hasLyricsfile",
+                "hasPlainLyrics",
+                "hasSyncedLyrics",
+                "hasWordSync",
+                "id",
+                "instrumental",
+                "trackName",
+            ]
+        );
+        for (key, of) in [
+            ("hasPlainLyrics", "plainLyrics"),
+            ("hasSyncedLyrics", "syncedLyrics"),
+            ("hasLyricsfile", "lyricsfile"),
+        ] {
+            assert_eq!(summary[key].as_bool().unwrap(), !full[of].is_null());
+        }
+    }
+    // Pages follow the ranking past the 20 of LRCLIB's search.
+    let mut paged = Vec::new();
+    for offset in (0..).step_by(7) {
+        let mut q = query.clone();
+        q["offset"] = offset.into();
+        q["limit"] = 7.into();
+        let page = ids(&json(api::search_page(&store, &params(q))));
+        let last = page.len() < 7;
+        paged.extend(page);
+        if last {
+            break;
+        }
+    }
+    assert!(paged.len() > 20, "{}", paged.len());
+    assert_eq!(paged[..20], ids(&v1)[..]);
+    assert!(
+        api::search_page(
+            &store,
+            &params(serde_json::json!({"q": "love", "limit": 0}))
+        )
+        .is_err()
+    );
+    // An artist's tracks, by name, in pages.
+    let artist = json(api::artist(
+        &store,
+        &params(serde_json::json!({"artist_name": "PROLIFIC  Artist", "limit": 100})),
+    ));
+    let total = usize::try_from(artist["total"].as_u64().unwrap()).unwrap();
+    assert!(total > 100, "{total}");
+    let names: Vec<String> = artist["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| normalize(t["trackName"].as_str().unwrap_or_default()))
+        .collect();
+    assert_eq!(names.len(), 100);
+    assert!(names.is_sorted());
+    let rest = json(api::artist(
+        &store,
+        &params(serde_json::json!({"artist_name": "prolific artist", "offset": 100, "limit": 100})),
+    ));
+    assert_eq!(rest["total"], artist["total"]);
+    assert!(
+        ids(&rest["tracks"])
+            .iter()
+            .all(|id| !ids(&artist["tracks"]).contains(id))
+    );
 
     // The search index has every track.
     let found = store
