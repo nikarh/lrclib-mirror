@@ -2,9 +2,9 @@ name: Publish
 
 # Builds the static binary once, then pushes the container image to ghcr.io and signs and uploads the release files.
 # There are no versions, only two rolling releases, each with an image:
-# - `v2`: main (images `v2` and `v2-sha-<commit>`), from the Latest workflow
-# - `v2-dev`: the pending upstream update (image `v2-dev`), from the Dev workflow
-# (`latest`, `dev` and the images `main`, `sha-<commit>`, `dev` are the previous version's, no longer updated.)
+# - `v2` ("Latest"): main (images `v2`, `main` and `v2-sha-<commit>`), from the Latest workflow
+# - `v2-dev` ("Dev"): the pending upstream update (images `v2-dev` and `dev`), from the Dev workflow
+# (The `v1` and `v1-dev` releases and images, and `sha-<commit>`, are the previous version's, no longer updated.)
 on:
   workflow_call:
     inputs:
@@ -96,9 +96,9 @@ jobs:
         run: |
           set -euo pipefail
           if [[ $TAG == v2 ]]; then
-            tags=(v2 "v2-sha-$(git rev-parse HEAD)")
+            tags=(v2 main "v2-sha-$(git rev-parse HEAD)")
           else
-            tags=("$TAG")
+            tags=(v2-dev dev)
           fi
           docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<<"$GH_TOKEN"
           for tag in "${tags[@]}"; do

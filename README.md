@@ -94,12 +94,12 @@ There are no versions, only builds of the newest code:
 
 | | Image | Release (binary, signed checksums) |
 | --- | --- | --- |
-| `main` | `ghcr.io/nikarh/lrclib-mirror:v2` (and `:v2-sha-<commit>`) | [`v2`](https://github.com/nikarh/lrclib-mirror/releases/tag/v2) |
-| pending update | `ghcr.io/nikarh/lrclib-mirror:v2-dev` | [`v2-dev`](https://github.com/nikarh/lrclib-mirror/releases/tag/v2-dev) |
+| `main` | `ghcr.io/nikarh/lrclib-mirror:main` or `:v2` (and `:v2-sha-<commit>`) | [Latest (`v2`)](https://github.com/nikarh/lrclib-mirror/releases/tag/v2) |
+| pending update | `ghcr.io/nikarh/lrclib-mirror:dev` or `:v2-dev` | [Dev (`v2-dev`)](https://github.com/nikarh/lrclib-mirror/releases/tag/v2-dev) |
 
-The previous version, which answered with LRCLIB's server from an SQLite copy of the dump (~270 GB), keeps its
-names, no longer updated: the `ghcr.io/nikarh/lrclib-mirror:main` image (and `:sha-<commit>`, `:dev`), the
-[`latest`](https://github.com/nikarh/lrclib-mirror/releases/tag/latest) release, and its code on the
+The previous version, which answered with LRCLIB's server from an SQLite copy of the dump (~270 GB), is no longer
+updated: the `ghcr.io/nikarh/lrclib-mirror:v1` image (and `:v1-dev`, `:sha-<commit>`), the
+[`v1`](https://github.com/nikarh/lrclib-mirror/releases/tag/v1) release, and its code on the
 [`legacy-sqlite`](https://github.com/nikarh/lrclib-mirror/tree/legacy-sqlite) branch. Its data directory isn't
 used by this version (`dumps/*.sqlite3` and `search-index/` can be removed once a store is imported).
 
@@ -187,9 +187,9 @@ every track, and the track every metadata lookup finds, against SQLite answering
 ## Verify downloads
 
 ```sh
-curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/latest/lrclib-mirror-x86_64-unknown-linux-musl
-curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/latest/SHA256SUMS
-curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/latest/SHA256SUMS.asc
+curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/v2/lrclib-mirror-x86_64-unknown-linux-musl
+curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/v2/SHA256SUMS
+curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/v2/SHA256SUMS.asc
 curl -L https://raw.githubusercontent.com/nikarh/lrclib-mirror/main/docs/signing-key.asc | gpg --import
 gpg --verify SHA256SUMS.asc SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS

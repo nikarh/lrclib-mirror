@@ -2,16 +2,16 @@
 
 There are no versions: the builds follow the web search's upstream and the dependencies.
 
-- **Latest** (every push to `main`): the `v2` tag moves to the new commit, the `v2` release (GitHub's latest) gets
-  the build's files, and the image is pushed as `v2` and `v2-sha-<commit>`. (The `latest` and `dev` releases and the
-  `main`, `sha-<commit>` and `dev` images are the previous version's, built from the `legacy-sqlite` branch, and no
-  longer updated: setups that follow them don't switch to this version unasked.)
+- **Latest** (every push to `main`): the `v2` tag moves to the new commit, the `v2` release ("Latest", GitHub's
+  latest) gets the build's files, and the image is pushed as `v2`, `main` and `v2-sha-<commit>`. (The `v1` and
+  `v1-dev` releases and images, and the `sha-<commit>` images, are the previous version's, built from the
+  `legacy-sqlite` branch, and no longer updated.)
 - **Upstream** (daily, 04:17 UTC, or by hand): moves the web search submodule to the newest upstream commit and runs
   `cargo update`. When anything changed, it force-pushes the `upstream-update` branch (one commit on top of `main`)
   and opens a pull request, or updates the open one, listing the upstream commits, upstream changelog additions, the
   `Cargo.lock` changes and whether `patches/` still apply. Once merged, the branch is deleted and the next change
   opens a new pull request.
-- **Dev** (every push to `upstream-update`): the `v2-dev` pre-release and the `v2-dev` image, to try an update before
+- **Dev** (every push to `upstream-update`): the `v2-dev` pre-release ("Dev") and the `v2-dev` and `dev` images, to try an update before
   merging it.
 - **Publish** (called by Latest and Dev): builds the static x86_64 binary (musl, web search embedded), wraps it in the
   `FROM scratch` image, checks the image runs read-only without capabilities, pushes it to `ghcr.io/nikarh/lrclib-mirror`,
