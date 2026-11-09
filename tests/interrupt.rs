@@ -13,7 +13,13 @@ use std::time::{Duration, Instant};
 use common::{build_db, tmp};
 use lrclib_mirror::store::{Store, with_scratch};
 
-fn import(db: &Path, out: &Path) -> std::process::Child {
+/// An import into `out`; what it logs goes to `log`.
+fn import(db: &Path, out: &Path, log: &Path) -> std::process::Child {
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .unwrap();
     Command::new(env!("CARGO_BIN_EXE_lrclib-mirror"))
         .args([
             "import",
@@ -23,9 +29,9 @@ fn import(db: &Path, out: &Path) -> std::process::Child {
         .args(["--import-threads", "2"])
         // Checkpoints often, so that interruptions land between them.
         .env("LRCLIB_MIRROR_CHECKPOINT_EVERY", "8")
-        .env("RUST_LOG", "warn")
+        .env("RUST_LOG", "info")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(log)
         .spawn()
         .unwrap()
 }
@@ -77,18 +83,24 @@ fn interrupted_imports_finish_the_same() {
 
     let reference = dir.join("reference");
     let started = Instant::now();
-    assert!(import(&db, &reference).wait().unwrap().success());
+    let log = dir.join("reference.log");
+    assert!(import(&db, &reference, &log).wait().unwrap().success());
     let whole = started.elapsed();
 
-    // Killed once at each of several points of an import, then again early in each restart, then run to the end.
+    // Killed once at each of several points of an import (the last ones while it finishes), then again earlier in
+    // each restart, then run to the end.
     let mut resumed_pass2 = false;
-    for step in 1..=6 {
+    for (step, permille) in [140, 290, 430, 570, 710, 860, 930, 970, 990]
+        .into_iter()
+        .enumerate()
+    {
         let out = dir.join(format!("out-{step}"));
-        let mut kill_at = whole * step / 7;
+        let log = dir.join(format!("out-{step}.log"));
+        let mut kill_at = whole * permille / 1000;
         let mut runs = 0;
         loop {
             runs += 1;
-            let mut child = import(&db, &out);
+            let mut child = import(&db, &out, &log);
             if runs <= 3 {
                 std::thread::sleep(kill_at);
                 if child.try_wait().unwrap().is_none() {
@@ -100,7 +112,12 @@ fn interrupted_imports_finish_the_same() {
                     continue;
                 }
             }
-            assert!(child.wait().unwrap().success(), "step {step}, run {runs}");
+            let status = child.wait().unwrap();
+            assert!(
+                status.success(),
+                "step {step}, run {runs}: {status}\n{}",
+                std::fs::read_to_string(&log).unwrap()
+            );
             break;
         }
         assert_same(&reference, &out);
