@@ -193,6 +193,8 @@ pub fn import<R: Read>(
 ) -> Result<ImportStats, ImportError> {
     std::fs::create_dir_all(out).map_err(io(out))?;
     if let Some(meta) = finished(out) {
+        // Interrupted right after it was marked finished.
+        let _ = std::fs::remove_file(out.join(PROGRESS));
         return Ok(meta.stats);
     }
     let tmp = out.join("tmp");
@@ -237,21 +239,29 @@ pub fn import<R: Read>(
             stats,
             dictionaries: false,
             checkpoint: None,
+            written: None,
         };
         write_progress(out, &progress)?;
         progress
     };
 
-    let started = Instant::now();
-    let meta = pass2(&tmp, out, &mut progress, options, stop)?;
-    let mut stats = meta.stats.clone();
-    stats.seconds_pass2 += started.elapsed().as_secs();
-    let meta = Meta {
-        stats: stats.clone(),
-        ..meta
+    let meta = if let Some(meta) = progress.written.clone() {
+        tracing::info!("the store was written before; finishing");
+        meta
+    } else {
+        let started = Instant::now();
+        let meta = pass2(&tmp, out, &mut progress, options, stop)?;
+        let mut stats = meta.stats.clone();
+        stats.seconds_pass2 += started.elapsed().as_secs();
+        let meta = Meta { stats, ..meta };
+        // From here on the temporary files aren't needed: an import interrupted while they are removed finishes
+        // without them.
+        progress.written = Some(meta.clone());
+        write_progress(out, &progress)?;
+        meta
     };
     finish(out, &meta)?;
-    Ok(stats)
+    Ok(meta.stats)
 }
 
 /// The store's `meta.json`, when `out` is a finished store.
@@ -273,14 +283,26 @@ fn clear_dir(dir: &Path) -> Result<(), ImportError> {
     Ok(())
 }
 
-/// Finishes a store: its files listed (`files.json`), then `meta.json`, which marks it finished; then the import's
-/// leftovers removed.
+/// Finishes a written store (`import.json` records it): the temporary files removed, its files listed
+/// (`files.json`), then `meta.json`, which marks it finished, then `import.json` removed. Interrupted at any point,
+/// it is run again.
 fn finish(out: &Path, meta: &Meta) -> Result<(), ImportError> {
     let tmp = out.join("tmp");
-    std::fs::remove_dir_all(&tmp).map_err(io(&tmp))?;
-    let _ = std::fs::remove_file(out.join(PROGRESS));
+    let removing = out.join("tmp.removing");
+    match std::fs::rename(&tmp, &removing) {
+        Ok(()) => {}
+        // Moved by an interrupted finish.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(ImportError::Io(tmp, e)),
+    }
+    match std::fs::remove_dir_all(&removing) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(ImportError::Io(removing, e)),
+    }
     remove_ids_partials(out, None);
-    let files = super::list_files(out).map_err(io(out))?;
+    let mut files = super::list_files(out).map_err(io(out))?;
+    files.retain(|(name, _)| name != PROGRESS);
     let path = out.join(super::FILES);
     let data =
         serde_json::to_vec_pretty(&files).map_err(|e| ImportError::Io(path.clone(), e.into()))?;
@@ -288,7 +310,9 @@ fn finish(out: &Path, meta: &Meta) -> Result<(), ImportError> {
     let path = out.join(META);
     let data =
         serde_json::to_vec_pretty(meta).map_err(|e| ImportError::Io(path.clone(), e.into()))?;
-    file::write_atomic(&path, &data).map_err(io(&path))
+    file::write_atomic(&path, &data).map_err(io(&path))?;
+    let _ = std::fs::remove_file(out.join(PROGRESS));
+    Ok(())
 }
 
 /// `import.json`: the dump was read (pass 1 is done), and how far pass 2 got.
@@ -302,6 +326,9 @@ struct Progress {
     /// The compression dictionaries are written.
     dictionaries: bool,
     checkpoint: Option<Checkpoint>,
+    /// Pass 2 is done: the store's files are written, what is left is [`finish`].
+    #[serde(default)]
+    written: Option<Meta>,
 }
 
 /// Pass 2's output files as they were after `buckets` buckets.
@@ -1734,8 +1761,9 @@ impl Writer {
         self.write_ids(IDS)?;
         self.ids = Vec::new();
         tracing::info!("merging the search index");
+        // Everything is in the index: an import interrupted after this commit adds nothing to it again.
         self.search
-            .finish()
+            .finish(&BUCKETS.to_string())
             .map_err(|x| ImportError::Search(x.to_string()))?;
         Ok((self.ordinal, self.track_blocks, self.lyrics_blocks))
     }

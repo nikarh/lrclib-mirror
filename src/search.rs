@@ -139,9 +139,9 @@ impl IndexBuilder {
         Ok(())
     }
 
-    /// Commits and merges everything into one segment.
-    pub fn finish(mut self) -> tantivy::Result<()> {
-        self.writer.commit()?;
+    /// Commits (with `payload`, which the merge keeps) and merges everything into one segment.
+    pub fn finish(mut self, payload: &str) -> tantivy::Result<()> {
+        self.commit(payload)?;
         let segments = self.index.searchable_segment_ids()?;
         if segments.len() > 1 {
             self.writer.merge(&segments).wait()?;
@@ -352,7 +352,7 @@ mod tests {
         b.add(&doc(2, "world hello", "artist two", "hello"))
             .unwrap();
         b.add(&doc(3, "something else", "hello", "")).unwrap();
-        b.finish().unwrap();
+        b.finish("").unwrap();
         let s = Search::open(&dir).unwrap();
         let mut all = s.search(Some("hello"), None, None, None).unwrap();
         all.sort_unstable();
