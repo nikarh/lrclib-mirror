@@ -1,5 +1,0 @@
-[submodule "upstream/lrclib-homepage"]
-	path = upstream/lrclib-homepage
-	url = https://github.com/tranxuanthang/lrclib-homepage.git
-	ignore = dirty
-	branch = main

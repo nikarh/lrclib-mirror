@@ -4,35 +4,53 @@ node = "26.13.0"
 git-cliff = "2.14.2"
 cargo-deny = "0.20.2"
 
-[tasks.patch]
-description = "Apply patches/ to the web search submodule (skips the ones already applied)"
-run = "scripts/patch-upstream.sh"
-
 [tasks."web:install"]
-description = "Install the frontend's dependencies"
-depends = ["patch"]
-dir = "upstream/lrclib-homepage"
+description = "Install the web search's dependencies"
+dir = "web"
 run = "npm ci --no-audit --no-fund"
 sources = ["package.json", "package-lock.json"]
 outputs = ["node_modules/.package-lock.json"]
 
 [tasks."web:build"]
-description = "Build the frontend into upstream/lrclib-homepage/dist (embedded by the next cargo build)"
+description = "Build the web search into web/dist (embedded by the next cargo build)"
 depends = ["web:install"]
-dir = "upstream/lrclib-homepage"
+dir = "web"
 run = "npm run build"
+
+[tasks."web:dev"]
+description = "The web search's dev server at http://localhost:5173, against the server of `mise run dev`"
+depends = ["web:install"]
+dir = "web"
+run = "npm run dev"
+
+[tasks."dev:remote"]
+description = "The web search's dev server at http://localhost:5173, against the lrclib-mirror at $LRCLIB_MIRROR_REMOTE"
+depends = ["web:install"]
+dir = "web"
+run = '''
+test -n "${LRCLIB_MIRROR_REMOTE:-}" || { echo "Set LRCLIB_MIRROR_REMOTE to the URL of a running lrclib-mirror (e.g. in mise.local.toml)" >&2; exit 1; }
+npm run dev
+'''
 
 [tasks.dev]
 description = "Run the server on ./dev-data (updates off: put a dump in dev-data/dumps)"
 run = "cargo run -- --data-dir dev-data --listen 127.0.0.1:3300 --update-schedule off"
 
 [tasks.fmt]
-description = "Format the Rust code"
-run = "cargo fmt"
+description = "Format the Rust code and the web search"
+depends = ["web:install"]
+run = ["cargo fmt", "npm --prefix web run format"]
 
 [tasks.lint]
-description = "rustfmt check and clippy"
-run = ["cargo fmt --all --check", "cargo clippy --locked --workspace --all-targets"]
+description = "rustfmt check, clippy, and the web search's oxfmt check, oxlint and type check"
+depends = ["web:install"]
+run = [
+  "cargo fmt --all --check",
+  "cargo clippy --locked --workspace --all-targets",
+  "npm --prefix web run format:check",
+  "npm --prefix web run lint",
+  "npm --prefix web run typecheck",
+]
 
 [tasks.test]
 description = "Run the tests"
@@ -47,9 +65,9 @@ description = "Audit dependencies: advisories, licenses, duplicates, sources"
 run = "cargo deny check"
 
 [tasks.ci]
-description = "What CI's check job runs: lint, tests, that the patch applies, that the frontend builds, action pins"
+description = "What CI's check job runs: lint, tests, that the web search builds, action pins"
 depends = ["lint", "test", "web:build"]
-run = ["scripts/patch-upstream.sh --check", "scripts/check-actions.sh"]
+run = "scripts/check-actions.sh"
 
 [tasks.check]
 description = "Everything CI checks"
