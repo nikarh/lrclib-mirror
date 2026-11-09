@@ -2,13 +2,13 @@ name: Publish
 
 # Builds the static binary once, then pushes the container image to ghcr.io and signs and uploads the release files.
 # There are no versions, only two rolling releases, each with an image:
-# - `latest`: main (images `main` and `sha-<commit>`), from the Latest workflow
-# - `dev`: the pending upstream update (image `dev`), from the Dev workflow
+# - `v1`: main (images `v1` and `v1-sha-<commit>`), from the Latest workflow
+# - `v1-dev`: the pending upstream update (image `v1-dev`), from the Dev workflow
 on:
   workflow_call:
     inputs:
       tag:
-        description: The release, latest or dev
+        description: The release, v1 or v1-dev
         type: string
         required: true
 
@@ -94,8 +94,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ $TAG == latest ]]; then
-            tags=(main "sha-$(git rev-parse HEAD)")
+          if [[ $TAG == v1 ]]; then
+            tags=(v1 "v1-sha-$(git rev-parse HEAD)")
           else
             tags=("$TAG")
           fi

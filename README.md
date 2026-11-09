@@ -23,8 +23,8 @@ There are no versions, only builds of the newest upstream code:
 
 | | Image | Release (binary, signed checksums) |
 | --- | --- | --- |
-| `main` | `ghcr.io/nikarh/lrclib-mirror:main` (and `:sha-<commit>`) | [`latest`](https://github.com/nikarh/lrclib-mirror/releases/tag/latest) |
-| pending upstream update | `ghcr.io/nikarh/lrclib-mirror:dev` | [`dev`](https://github.com/nikarh/lrclib-mirror/releases/tag/dev) |
+| `legacy-sqlite` | `ghcr.io/nikarh/lrclib-mirror:v1` (older builds: `:sha-<commit>`) | [v1 Latest (`v1`)](https://github.com/nikarh/lrclib-mirror/releases/tag/v1) |
+| pending upstream update | `ghcr.io/nikarh/lrclib-mirror:v1-dev` | [v1 Dev (`v1-dev`)](https://github.com/nikarh/lrclib-mirror/releases/tag/v1-dev) |
 
 The image is `FROM scratch` (a static x86_64 musl binary and CA certificates). `lrclib-mirror --version` names the
 upstream commits it was built from.
@@ -41,7 +41,7 @@ Reads are random, so an SSD answers fastest; a hard disk works too (a lookup is 
 ```yaml
 services:
   lrclib:
-    image: ghcr.io/nikarh/lrclib-mirror:main
+    image: ghcr.io/nikarh/lrclib-mirror:v1
     restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
@@ -85,9 +85,9 @@ With updates off, put a dump into `<data-dir>/dumps/` yourself, unpacked and nam
 ## Verify downloads
 
 ```sh
-curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/latest/lrclib-mirror-x86_64-unknown-linux-musl
-curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/latest/SHA256SUMS
-curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/latest/SHA256SUMS.asc
+curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/v1/lrclib-mirror-x86_64-unknown-linux-musl
+curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/v1/SHA256SUMS
+curl -LO https://github.com/nikarh/lrclib-mirror/releases/download/v1/SHA256SUMS.asc
 curl -L https://raw.githubusercontent.com/nikarh/lrclib-mirror/main/docs/signing-key.asc | gpg --import
 gpg --verify SHA256SUMS.asc SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS

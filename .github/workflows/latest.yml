@@ -1,7 +1,7 @@
 name: Latest
 
-# Keeps the `latest` release at the tip of main: on every push the tag moves to the new commit and Publish builds,
-# signs and uploads the files, and pushes the `main` image. There are no versioned releases: what upstream changes
+# Keeps the `v1` release at the tip of main: on every push the tag moves to the new commit and Publish builds,
+# signs and uploads the files, and pushes the `v1` image. There are no versioned releases: what upstream changes
 # arrives through the Upstream workflow's pull requests.
 on:
   push:
@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   tag:
-    name: Move the latest tag
+    name: Move the v1 tag
     if: github.repository_owner == 'nikarh'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -35,7 +35,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
-        run: scripts/rolling-release.sh latest "Latest (${GITHUB_SHA:0:7})" --latest
+        run: scripts/rolling-release.sh v1 "v1 Latest (${GITHUB_SHA:0:7})" --latest
 
   publish:
     name: Publish
@@ -46,5 +46,5 @@ jobs:
       packages: write
     uses: ./.github/workflows/publish.yml
     with:
-      tag: latest
+      tag: v1
     secrets: inherit

@@ -2,14 +2,14 @@
 
 There are no versions: the builds follow upstream.
 
-- **Latest** (every push to `main`): the `latest` tag moves to the new commit, the `latest` release (GitHub's latest)
-  gets the build's files, and the image is pushed as `main` and `sha-<commit>`.
+- **Latest** (every push to `main`): the `v1` tag moves to the new commit, the `v1` release ("v1 Latest")
+  gets the build's files, and the image is pushed as `v1` and `v1-sha-<commit>`.
 - **Upstream** (daily, 04:17 UTC, or by hand): moves the submodules to the newest upstream commits and runs
   `cargo update`. When anything changed, it force-pushes the `upstream-update` branch (one commit on top of `main`)
   and opens a pull request, or updates the open one, listing the upstream commits, upstream changelog additions, the
   `Cargo.lock` changes and whether `patches/` still apply. Once merged, the branch is deleted and the next change
   opens a new pull request.
-- **Dev** (every push to `upstream-update`): the `dev` pre-release and the `dev` image, to try an update before
+- **Dev** (every push to `upstream-update`): the `v1-dev` pre-release ("v1 Dev") and the `v1-dev` image, to try an update before
   merging it.
 - **Publish** (called by Latest and Dev): builds the static x86_64 binary (musl, web search embedded), wraps it in the
   `FROM scratch` image, checks the image runs read-only without capabilities, pushes it to `ghcr.io/nikarh/lrclib-mirror`,
