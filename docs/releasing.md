@@ -1,15 +1,14 @@
 # Releasing
 
-There are no versions: the builds follow the web search's upstream and the dependencies.
+There are no versions: the builds follow `main` and the dependencies.
 
 - **Latest** (every push to `main`): the `v2` tag moves to the new commit, the `v2` release ("Latest", GitHub's
   latest) gets the build's files, and the image is pushed as `v2`, `main` and `v2-sha-<commit>`. (The `v1` and
   `v1-dev` releases and images, and the `sha-<commit>` images, are the previous version's, built from the
   `legacy-sqlite` branch, and no longer updated.)
-- **Upstream** (daily, 04:17 UTC, or by hand): moves the web search submodule to the newest upstream commit and runs
-  `cargo update`. When anything changed, it force-pushes the `upstream-update` branch (one commit on top of `main`)
-  and opens a pull request, or updates the open one, listing the upstream commits, upstream changelog additions, the
-  `Cargo.lock` changes and whether `patches/` still apply. Once merged, the branch is deleted and the next change
+- **Upstream** (daily, 04:17 UTC, or by hand): runs `cargo update` and `npm update` (in `web/`). When a lockfile
+  changed, it force-pushes the `upstream-update` branch (one commit on top of `main`) and opens a pull request, or
+  updates the open one, listing the packages that changed. Once merged, the branch is deleted and the next change
   opens a new pull request.
 - **Dev** (every push to `upstream-update`): the `v2-dev` pre-release ("Dev") and the `v2-dev` and `dev` images, to try an update before
   merging it.
@@ -20,7 +19,7 @@ There are no versions: the builds follow the web search's upstream and the depen
 | Asset | Contents |
 | --- | --- |
 | `lrclib-mirror-x86_64-unknown-linux-musl` | The static binary |
-| `LICENSE-lrclib`, `LICENSE-lrclib-homepage` | The MIT licenses of LRCLIB's server (code ported to this crate) and web search (built in) |
+| `LICENSE-lrclib` | The MIT license of LRCLIB's server (code ported to this crate) |
 | `SHA256SUMS`, `SHA256SUMS.asc` | Checksums of the files and their detached GPG signature |
 
 Dependabot's pull requests (actions, Docker base images) are merged by **Auto-merge** once every required check is

@@ -1,6 +1,6 @@
 name: Dev
 
-# Builds the pending upstream update (the `upstream-update` branch of the Upstream workflow's pull request) as the
+# Builds the pending dependency update (the `upstream-update` branch of the Upstream workflow's pull request) as the
 # `v2-dev` pre-release ("Dev") and the `v2-dev` and `dev` images, so it can be tried before merging.
 on:
   push:
@@ -34,7 +34,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
-        run: scripts/rolling-release.sh v2-dev "Dev (${GITHUB_SHA:0:7}, pending upstream update)" --prerelease
+        run: scripts/rolling-release.sh v2-dev "Dev (${GITHUB_SHA:0:7}, pending dependency update)" --prerelease
 
   publish:
     name: Publish
