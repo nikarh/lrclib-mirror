@@ -2,7 +2,7 @@
 # Builds the image from source. CI publishes the same image from a binary it has built already (Dockerfile.ci).
 
 # The web search, built once, natively.
-FROM --platform=$BUILDPLATFORM node:26.13.0-alpine AS web
+FROM --platform=$BUILDPLATFORM node:26.13.1-alpine AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
