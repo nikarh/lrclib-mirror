@@ -8,6 +8,9 @@
 //! - Overflow pages carry no type: they are known only from the row (or the previous overflow page) pointing to them.
 //!   Most come after the leaf that points to them, but not all; pages that arrive before anything claims them are set
 //!   aside in a spill file until they are claimed.
+//! - Rows waiting for overflow pages that come later are kept in memory up to [`WAITING_MEMORY`], and beyond that
+//!   in the spill file too: in some dumps a table's leaves all come long before their overflow pages, and the rows
+//!   waiting for them add up to tens of GB.
 //! - Interior and index pages are of no use here. An index interior page (`0x02`) can't be told from an overflow page
 //!   whose next-page pointer starts with `0x02`, so those are set aside too; the others are skipped.
 //!
@@ -26,6 +29,8 @@ const TABLE_LEAF: u8 = 0x0d;
 const TABLE_INTERIOR: u8 = 0x05;
 const INDEX_LEAF: u8 = 0x0a;
 const INDEX_INTERIOR: u8 = 0x02;
+/// What rows waiting for overflow pages may take in memory; the rest wait in the spill file.
+const WAITING_MEMORY: usize = 64 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SqliteError {
@@ -48,6 +53,8 @@ pub struct ScanStats {
     pub rows: u64,
     /// Pages that arrived before the row pointing to them (at most this many were set aside at once).
     pub max_early_pages: usize,
+    /// Rows that waited for an overflow page not seen yet (at most this many at once).
+    pub max_waiting_rows: usize,
 }
 
 /// A column value of a record.
@@ -162,23 +169,57 @@ struct Pending {
     data: Vec<u8>,
 }
 
-/// Pages that arrived before the row (or overflow page) pointing to them, kept in a temporary file. Most are claimed
-/// soon after; their slots are reused, so the file stays as large as the most pages set aside at once.
+/// A row waiting for an overflow page: what it has so far is in memory, or in slots of the spill file.
+struct Waiting {
+    rowid: i64,
+    total: usize,
+    data: Held,
+}
+
+enum Held {
+    Memory(Vec<u8>),
+    Spilled { len: usize, slots: Box<[u32]> },
+}
+
+/// Pages that arrived before the row (or overflow page) pointing to them, and the parts of rows waiting for overflow
+/// pages that don't fit in memory, kept in a temporary file in page-sized slots. Most are claimed soon after; slots
+/// are reused, so the file stays as large as the most set aside at once.
 struct Spill {
     file: File,
-    page_size: u64,
-    slots: u64,
-    free: Vec<u64>,
-    pages: HashMap<u32, u64>,
+    page_size: usize,
+    slots: u32,
+    free: Vec<u32>,
+    pages: HashMap<u32, u32>,
 }
 
 impl Spill {
-    fn put(&mut self, page_no: u32, page: &[u8]) -> std::io::Result<()> {
-        let slot = self.free.pop().unwrap_or_else(|| {
-            self.slots += 1;
+    fn offset(&self, slot: u32) -> u64 {
+        u64::from(slot) * self.page_size as u64
+    }
+
+    fn write(&mut self, data: &[u8]) -> std::io::Result<u32> {
+        let slot = if let Some(slot) = self.free.pop() {
+            slot
+        } else {
+            self.slots = self
+                .slots
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("the spill file is full (2^32 pages)"))?;
             self.slots - 1
-        });
-        self.file.write_all_at(page, slot * self.page_size)?;
+        };
+        self.file.write_all_at(data, self.offset(slot))?;
+        Ok(slot)
+    }
+
+    /// Reads a slot back into `buf` (at most a page) and frees it.
+    fn read(&mut self, slot: u32, buf: &mut [u8]) -> std::io::Result<()> {
+        self.file.read_exact_at(buf, self.offset(slot))?;
+        self.free.push(slot);
+        Ok(())
+    }
+
+    fn put(&mut self, page_no: u32, page: &[u8]) -> std::io::Result<()> {
+        let slot = self.write(page)?;
         self.pages.insert(page_no, slot);
         Ok(())
     }
@@ -187,9 +228,30 @@ impl Spill {
         let Some(slot) = self.pages.remove(&page_no) else {
             return Ok(false);
         };
-        self.file.read_exact_at(buf, slot * self.page_size)?;
-        self.free.push(slot);
+        self.read(slot, buf)?;
         Ok(true)
+    }
+
+    /// Sets aside the part of a row read so far.
+    fn hold(&mut self, data: &[u8]) -> std::io::Result<Held> {
+        let slots = data
+            .chunks(self.page_size)
+            .map(|chunk| self.write(chunk))
+            .collect::<std::io::Result<_>>()?;
+        Ok(Held::Spilled {
+            len: data.len(),
+            slots,
+        })
+    }
+
+    /// Reads back the part of a row set aside, into a buffer with room for the whole row.
+    fn unhold(&mut self, len: usize, slots: &[u32], total: usize) -> std::io::Result<Vec<u8>> {
+        let mut data = vec![0u8; len];
+        data.reserve_exact(total.saturating_sub(len));
+        for (&slot, chunk) in slots.iter().zip(data.chunks_mut(self.page_size)) {
+            self.read(slot, chunk)?;
+        }
+        Ok(data)
     }
 }
 
@@ -197,8 +259,18 @@ impl Spill {
 /// order. `spill` is a temporary file for pages that arrive before the row pointing to them (it is truncated, and
 /// can be removed afterwards).
 pub fn scan<R: Read>(
+    input: R,
+    spill: &Path,
+    on_row: impl FnMut(i64, &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+) -> Result<ScanStats, SqliteError> {
+    scan_with(input, spill, WAITING_MEMORY, on_row)
+}
+
+/// [`scan`], with rows waiting for overflow pages taking at most `waiting_memory` bytes in memory.
+fn scan_with<R: Read>(
     mut input: R,
     spill: &Path,
+    waiting_memory: usize,
     mut on_row: impl FnMut(i64, &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
 ) -> Result<ScanStats, SqliteError> {
     let mut header = [0u8; 100];
@@ -252,9 +324,11 @@ pub fn scan<R: Read>(
         max_local_leaf: usable - 35,
         min_local: (usable - 12) * 32 / 255 - 23,
         waiting: HashMap::new(),
+        waiting_memory: 0,
+        max_waiting_memory: waiting_memory,
         spill: Spill {
             file: spill_file,
-            page_size: page_size as u64,
+            page_size,
             slots: 0,
             free: Vec::new(),
             pages: HashMap::new(),
@@ -317,7 +391,10 @@ struct Scanner {
     max_local_leaf: usize,
     min_local: usize,
     /// Rows waiting for an overflow page, by that page's number.
-    waiting: HashMap<u32, Pending>,
+    waiting: HashMap<u32, Waiting>,
+    /// The memory the rows waiting in memory take, and what they may take.
+    waiting_memory: usize,
+    max_waiting_memory: usize,
     spill: Spill,
     stats: ScanStats,
     /// Whether an overflow page can look like an index interior page (`0x02`): the file has pages numbered
@@ -333,7 +410,19 @@ impl Scanner {
         chased: &mut [u8],
         on_row: &mut RowFn<'_>,
     ) -> Result<(), SqliteError> {
-        if let Some(pending) = self.waiting.remove(&page_no) {
+        if let Some(waiting) = self.waiting.remove(&page_no) {
+            let data = match waiting.data {
+                Held::Memory(data) => {
+                    self.waiting_memory -= data.capacity();
+                    data
+                }
+                Held::Spilled { len, slots } => self.spill.unhold(len, &slots, waiting.total)?,
+            };
+            let pending = Pending {
+                rowid: waiting.rowid,
+                total: waiting.total,
+                data,
+            };
             return self.overflow(pending, page, chased, on_row);
         }
         let off = if page_no == 1 { 100 } else { 0 };
@@ -435,6 +524,31 @@ impl Scanner {
         Ok(next)
     }
 
+    /// Sets a row aside until its overflow page `next` comes: in memory while there is room, else in the spill file.
+    fn wait(&mut self, pending: Pending, next: u32) -> Result<(), SqliteError> {
+        if self.waiting.contains_key(&next) {
+            return Err(SqliteError::Malformed(format!(
+                "two rows share overflow page {next}"
+            )));
+        }
+        let data = if self.waiting_memory + pending.data.capacity() <= self.max_waiting_memory {
+            self.waiting_memory += pending.data.capacity();
+            Held::Memory(pending.data)
+        } else {
+            self.spill.hold(&pending.data)?
+        };
+        self.waiting.insert(
+            next,
+            Waiting {
+                rowid: pending.rowid,
+                total: pending.total,
+                data,
+            },
+        );
+        self.stats.max_waiting_rows = self.stats.max_waiting_rows.max(self.waiting.len());
+        Ok(())
+    }
+
     /// Follows a row's overflow chain from page `next` through the pages set aside, until the row is complete (and
     /// handed to `on_row`) or the chain reaches a page not seen yet (and the row waits for it).
     fn chase(
@@ -456,12 +570,7 @@ impl Scanner {
                 )));
             }
             if !self.spill.take(next, chased)? {
-                if self.waiting.insert(next, pending).is_some() {
-                    return Err(SqliteError::Malformed(format!(
-                        "two rows share overflow page {next}"
-                    )));
-                }
-                return Ok(());
+                return self.wait(pending, next);
             }
             next = self.append(&mut pending, chased)?;
         }
@@ -497,14 +606,20 @@ mod tests {
         N.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn rows_of(bytes: &[u8]) -> Result<Vec<(i64, Vec<Value<'static>>)>, SqliteError> {
+    type Rows = Vec<(i64, Vec<Value<'static>>)>;
+
+    fn rows_of(bytes: &[u8]) -> Result<Rows, SqliteError> {
+        rows_with(bytes, WAITING_MEMORY).map(|(rows, _)| rows)
+    }
+
+    fn rows_with(bytes: &[u8], waiting_memory: usize) -> Result<(Rows, ScanStats), SqliteError> {
         let spill = std::env::temp_dir().join(format!(
             "lrclib-mirror-spill-{}-{}",
             std::process::id(),
             rand_suffix()
         ));
         let mut rows = Vec::new();
-        let result = scan(bytes, &spill, |rowid, payload| {
+        let result = scan_with(bytes, &spill, waiting_memory, |rowid, payload| {
             let values = decode_record(payload)?
                 .into_iter()
                 .map(|v| match v {
@@ -519,7 +634,7 @@ mod tests {
             Ok(())
         });
         let _ = std::fs::remove_file(&spill);
-        result.map(|_| rows)
+        result.map(|stats| (rows, stats))
     }
 
     #[test]
@@ -538,7 +653,12 @@ mod tests {
         setup.push_str("INSERT INTO t VALUES (1000, NULL, x'00ff', NULL);");
         setup.push_str("CREATE INDEX t_a ON t (a);");
         for page_size in [512, 4096] {
-            let rows = rows_of(&db_bytes(&setup, page_size)).unwrap();
+            let bytes = db_bytes(&setup, page_size);
+            let rows = rows_of(&bytes).unwrap();
+            // Rows waiting for their overflow pages in the spill file read the same as rows waiting in memory.
+            let (spilled, stats) = rows_with(&bytes, 0).unwrap();
+            assert!(stats.max_waiting_rows > 0, "page size {page_size}");
+            assert_eq!(spilled, rows, "page size {page_size}");
             let t: Vec<_> = rows.iter().filter(|(_, v)| v.len() == 4).collect();
             assert_eq!(t.len(), 601, "page size {page_size}");
             for (rowid, v) in &t {
