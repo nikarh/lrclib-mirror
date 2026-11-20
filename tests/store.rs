@@ -88,6 +88,7 @@ fn imports_and_answers_like_lrclib() {
         stats.lyricsfile_built > 0 && stats.lyricsfile_head > 0 && stats.lyricsfile_text > 0,
         "{stats:?}"
     );
+    assert!(stats.lyricsfile_packed > 0, "{stats:?}");
     assert!(stats.lower_exceptions > 0, "{stats:?}");
     assert_eq!(stats.broken_tracks, 1, "{stats:?}");
     // The prolific artist's bucket is larger than its share of the memory.

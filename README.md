@@ -5,7 +5,7 @@ copy of LRCLIB's [public database dump](https://lrclib.net/db-dumps), which it k
 a music library needs lyrics for many tracks: no rate limits, no network round trips.
 
 The dump is a ~50 GB download that unpacks to a ~270 GB SQLite database (2026). lrclib-mirror never unpacks it:
-it reads the rows out of the download as it streams in and builds a store of **9.3 GB** (search index included),
+it reads the rows out of the download as it streams in and builds a store of **9–14 GB** (search index included),
 which answers the API as LRCLIB's server does, byte for byte, about twice as fast: a lookup in well under a
 millisecond.
 
@@ -50,7 +50,7 @@ can be computed from the rest:
 | What | Dump | Store |
 | --- | --- | --- |
 | Lyrics versions | 35.1 M | 34.6 M (only the current ones) |
-| Lyricsfiles | 3.7 KB each, 60% of the bytes | ~97% are what LRCLIB's server builds from the track and its lyrics, and aren't stored; ~4% differ only in their metadata, which alone is kept |
+| Lyricsfiles | 3.7 KB each, 60% of the bytes | ~97% are what LRCLIB's server builds from the track and its lyrics, and aren't stored; ~4% differ only in their metadata, which alone is kept. Those written by their authors (timings in milliseconds, word timings) are packed: timings as differences, a word as its length in its line's text, the plain lyrics left out when they are the row's |
 | Synced lyrics | stored | ~62% repeat the plain lyrics line by line: only the timestamps are kept |
 | Plain lyrics | stored | ~3% are the synced ones without timestamps, and aren't stored |
 | Normalized names (for lookups) | stored, and indexed | computed (kept for the 0.03% LRCLIB normalized differently in the past) |
@@ -67,8 +67,8 @@ imports the dump again rather than serve it (the API answers `503` until then).
 | | Dump (SQLite + LRCLIB's search index) | Store |
 | --- | --- | --- |
 | Download | 49 GB (gzip) | the same |
-| On disk | 268.6 GB + 2.5 GB | 9.25 GB: lyrics 6.80, tracks 0.90, search index 1.37, id map 0.16 |
-| Disk while updating | old + new database, the new one unpacked: ~540 GB | old store + the new one and its temporary files: ~32 GB |
+| On disk | 268.6 GB + 2.5 GB | 9.25 GB: lyrics 6.80, tracks 0.90, search index 1.37, id map 0.16 (2026-11-19, with 5.5 M Lyricsfiles written by their authors: 13.4 GB, lyrics 10.95) |
+| Disk while updating | old + new database, the new one unpacked: ~540 GB | old store + the new one and its temporary files: ~32 GB (2026-11-19: ~55 GB) |
 
 ### Speed
 
@@ -102,8 +102,8 @@ indexes bucket by bucket. Measured on the 2026-10-30 dump (34.6 M tracks):
 
 The 2026-11-19 dump (34.9 M tracks, 64 GB `.gz`) is laid out differently: the lyrics table's leaf pages come long
 before their overflow pages, so most lyrics rows can't be finished when their leaf goes by. Up to 4.4 M rows wait at
-once; beyond 64 MB they wait on disk, next to the pages that come early. Importing it with 3 threads and 2560 MB, in
-a cgroup limited to 4 GB, took 36 min, 3.5 GB of memory at the peak and 76 GB of temporary disk.
+once; beyond 64 MB they wait on disk, compressed (27 GB of rows in 9 GB). Importing it with 3 threads and 2560 MB,
+in a cgroup limited to 4 GB, took 42 min, 2.1 GB of memory at the peak and 41 GB of temporary disk.
 
 Reading the dump (unpacking 270 GB of gzip, picking out the rows) takes two thirds of it; the unpacking is a single
 stream, so more cores help the rest more than it.
@@ -172,7 +172,7 @@ Flags, each with an environment variable fallback:
 | `--data-dir` | `LRCLIB_MIRROR_DATA_DIR` | `/data` | Stores (`stores/`) and dumps to import (`dumps/`) |
 | `--listen` | `LRCLIB_MIRROR_LISTEN` | `0.0.0.0:3300` | HTTP address |
 | `--update-schedule` | `LRCLIB_MIRROR_UPDATE_SCHEDULE` | `34 2 * * *` | When to look for a newer dump, besides at start: a cron expression (`minute hour day month weekday`, e.g. `0 */6 * * *`, `30 4 * * mon`, or `@daily`) in the time zone of `TZ` (see below); `off`: never. The default is every day at 02:34; after a failed check the next one comes within an hour |
-| `--min-free-gb` | `LRCLIB_MIRROR_MIN_FREE_GB` | `100` | Free space an import needs to start (what an interrupted import of the same dump has counts as free) |
+| `--min-free-gb` | `LRCLIB_MIRROR_MIN_FREE_GB` | `60` | Free space an import needs to start (what an interrupted import of the same dump has counts as free) |
 | `--import-threads` | `LRCLIB_MIRROR_IMPORT_THREADS` | the CPUs (of the container's quota) | Threads importing a dump |
 | `--import-memory` | `LRCLIB_MIRROR_IMPORT_MEMORY` | 60% of the container's limit or the machine's memory, 768 to 4096 | MB an import may take, roughly (at least 768) |
 | `--listing-url` | `LRCLIB_MIRROR_LISTING_URL` | LRCLIB's | The dump listing |

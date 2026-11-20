@@ -29,7 +29,7 @@ Options (each has an environment variable fallback):
                                                         cron expression (minute hour day month weekday) in
                                                         the time zone of TZ (else the system's); off: never
                                                         [34 2 * * *, every day at 02:34]
-  --min-free-gb GB         LRCLIB_MIRROR_MIN_FREE_GB    free space an import needs to start [100]
+  --min-free-gb GB         LRCLIB_MIRROR_MIN_FREE_GB    free space an import needs to start [60]
   --import-threads N       LRCLIB_MIRROR_IMPORT_THREADS threads importing a dump [the number of CPUs]
   --import-memory MB       LRCLIB_MIRROR_IMPORT_MEMORY  memory an import may take, roughly (at least 768)
                                                         [60% of the container's limit or the machine's
@@ -109,7 +109,7 @@ impl Config {
             }),
             None => None,
         };
-        let min_free_gb: u64 = value(args, "--min-free-gb", "LRCLIB_MIRROR_MIN_FREE_GB", 100)?;
+        let min_free_gb: u64 = value(args, "--min-free-gb", "LRCLIB_MIRROR_MIN_FREE_GB", 60)?;
         let import_threads: usize = value(
             args,
             "--import-threads",
