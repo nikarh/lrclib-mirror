@@ -100,6 +100,11 @@ indexes bucket by bucket. Measured on the 2026-10-30 dump (34.6 M tracks):
 | The image, in a container limited to 4 CPUs and 2 GB, from the 49 GB `.gz` | 30 min | 1.4 GB | 22 GB |
 | A native build on 4 cores, from the unpacked dump | 17 min | 3.6 GB | 22 GB |
 
+The 2026-11-19 dump (34.9 M tracks, 64 GB `.gz`) is laid out differently: the lyrics table's leaf pages come long
+before their overflow pages, so most lyrics rows can't be finished when their leaf goes by. Up to 4.4 M rows wait at
+once; beyond 64 MB they wait on disk, next to the pages that come early. Importing it with 3 threads and 2560 MB, in
+a cgroup limited to 4 GB, took 36 min, 3.5 GB of memory at the peak and 76 GB of temporary disk.
+
 Reading the dump (unpacking 270 GB of gzip, picking out the rows) takes two thirds of it; the unpacking is a single
 stream, so more cores help the rest more than it.
 
@@ -167,7 +172,7 @@ Flags, each with an environment variable fallback:
 | `--data-dir` | `LRCLIB_MIRROR_DATA_DIR` | `/data` | Stores (`stores/`) and dumps to import (`dumps/`) |
 | `--listen` | `LRCLIB_MIRROR_LISTEN` | `0.0.0.0:3300` | HTTP address |
 | `--update-schedule` | `LRCLIB_MIRROR_UPDATE_SCHEDULE` | `34 2 * * *` | When to look for a newer dump, besides at start: a cron expression (`minute hour day month weekday`, e.g. `0 */6 * * *`, `30 4 * * mon`, or `@daily`) in the time zone of `TZ` (see below); `off`: never. The default is every day at 02:34; after a failed check the next one comes within an hour |
-| `--min-free-gb` | `LRCLIB_MIRROR_MIN_FREE_GB` | `60` | Free space an import needs to start (what an interrupted import of the same dump has counts as free) |
+| `--min-free-gb` | `LRCLIB_MIRROR_MIN_FREE_GB` | `100` | Free space an import needs to start (what an interrupted import of the same dump has counts as free) |
 | `--import-threads` | `LRCLIB_MIRROR_IMPORT_THREADS` | the CPUs (of the container's quota) | Threads importing a dump |
 | `--import-memory` | `LRCLIB_MIRROR_IMPORT_MEMORY` | 60% of the container's limit or the machine's memory, 768 to 4096 | MB an import may take, roughly (at least 768) |
 | `--listing-url` | `LRCLIB_MIRROR_LISTING_URL` | LRCLIB's | The dump listing |

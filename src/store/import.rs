@@ -140,6 +140,7 @@ pub struct ImportStats {
     /// Buckets too large for the memory, made in parts.
     pub split_buckets: u64,
     pub max_early_pages: usize,
+    pub max_waiting_rows: usize,
     pub seconds_pass1: u64,
     pub seconds_pass2: u64,
 }
@@ -801,6 +802,7 @@ fn pass1<R: Read>(
     }
     stats.pages = scan_stats.pages;
     stats.max_early_pages = scan_stats.max_early_pages;
+    stats.max_waiting_rows = scan_stats.max_waiting_rows;
     counters.add_to(stats);
     if stats.tracks == 0 {
         return Err(ImportError::Data("no tracks".to_owned()));
