@@ -10,7 +10,7 @@
 //!   aside in a spill file until they are claimed.
 //! - Rows waiting for overflow pages that come later are kept in memory up to [`WAITING_MEMORY`], and beyond that
 //!   in the spill file too: in some dumps a table's leaves all come long before their overflow pages, and the rows
-//!   waiting for them add up to tens of GB.
+//!   waiting for them add up to tens of GB. Rows wait there compressed.
 //! - Interior and index pages are of no use here. An index interior page (`0x02`) can't be told from an overflow page
 //!   whose next-page pointer starts with `0x02`, so those are set aside too; the others are skipped.
 //!
@@ -55,6 +55,8 @@ pub struct ScanStats {
     pub max_early_pages: usize,
     /// Rows that waited for an overflow page not seen yet (at most this many at once).
     pub max_waiting_rows: usize,
+    /// The most the spill file held at once (compressed).
+    pub max_spill_bytes: u64,
 }
 
 /// A column value of a record.
@@ -162,96 +164,215 @@ fn be_u32(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
 
-/// A row whose record continues in overflow pages not seen yet.
+/// A row whose record continues in overflow pages: what it has so far is in parts set aside in the spill file
+/// ([`Spill::write`]), then in memory.
 struct Pending {
     rowid: i64,
     total: usize,
+    spilled: Box<[u32]>,
+    spilled_len: usize,
     data: Vec<u8>,
 }
 
-/// A row waiting for an overflow page: what it has so far is in memory, or in slots of the spill file.
+impl Pending {
+    fn len(&self) -> usize {
+        self.spilled_len + self.data.len()
+    }
+}
+
+/// A row waiting for an overflow page (kept small: there can be millions). A row that waits again is set aside only
+/// as far as it grew since it last waited: a row whose overflow pages come one by one, long apart, isn't written
+/// again and again.
 struct Waiting {
     rowid: i64,
-    total: usize,
-    data: Held,
+    total: u32,
+    spilled_len: u32,
+    held: Held,
 }
 
 enum Held {
     Memory(Vec<u8>),
-    Spilled { len: usize, slots: Box<[u32]> },
+    /// Its parts in the spill file.
+    Spilled(Box<[u32]>),
 }
 
+/// In the length of a part set aside: written as it is, not compressed.
+const STORED: u32 = 1 << 31;
+/// The size of the units the spill file is made of.
+const SPILL_UNIT: usize = 512;
+
 /// Pages that arrived before the row (or overflow page) pointing to them, and the parts of rows waiting for overflow
-/// pages that don't fit in memory, kept in a temporary file in page-sized slots. Most are claimed soon after; slots
-/// are reused, so the file stays as large as the most set aside at once.
+/// pages that don't fit in memory, kept in a temporary file. Each is written to units of the file (not necessarily
+/// adjacent), rows compressed. Units are reused once what was in them is claimed, so the file stays about as large as
+/// the most set aside at once, compressed.
 struct Spill {
     file: File,
-    page_size: usize,
-    slots: u32,
+    units: u32,
     free: Vec<u32>,
-    pages: HashMap<u32, u32>,
+    /// How many bytes set aside are in the file, and the most there were.
+    bytes: u64,
+    max_bytes: u64,
+    /// Pages set aside, by number ([`Spill::write`]).
+    pages: HashMap<u32, Box<[u32]>>,
+    compressor: zstd::bulk::Compressor<'static>,
+    decompressor: zstd::bulk::Decompressor<'static>,
+    buf: Vec<u8>,
 }
 
 impl Spill {
-    fn offset(&self, slot: u32) -> u64 {
-        u64::from(slot) * self.page_size as u64
+    fn new(file: File) -> std::io::Result<Self> {
+        Ok(Self {
+            file,
+            units: 0,
+            free: Vec::new(),
+            bytes: 0,
+            max_bytes: 0,
+            pages: HashMap::new(),
+            compressor: zstd::bulk::Compressor::new(1)?,
+            decompressor: zstd::bulk::Decompressor::new()?,
+            buf: Vec::new(),
+        })
     }
 
-    fn write(&mut self, data: &[u8]) -> std::io::Result<u32> {
-        let slot = if let Some(slot) = self.free.pop() {
-            slot
-        } else {
-            self.slots = self
-                .slots
+    /// The runs of adjacent units of `units`: (first unit, index in `units`, count).
+    fn runs(units: &[u32]) -> impl Iterator<Item = (u32, usize, usize)> + '_ {
+        let mut i = 0;
+        std::iter::from_fn(move || {
+            let first = *units.get(i)?;
+            let start = i;
+            let mut next = first;
+            i += 1;
+            while next
                 .checked_add(1)
-                .ok_or_else(|| std::io::Error::other("the spill file is full (2^32 pages)"))?;
-            self.slots - 1
-        };
-        self.file.write_all_at(data, self.offset(slot))?;
-        Ok(slot)
+                .is_some_and(|n| units.get(i) == Some(&n))
+            {
+                next += 1;
+                i += 1;
+            }
+            Some((first, start, i - start))
+        })
     }
 
-    /// Reads a slot back into `buf` (at most a page) and frees it.
-    fn read(&mut self, slot: u32, buf: &mut [u8]) -> std::io::Result<()> {
-        self.file.read_exact_at(buf, self.offset(slot))?;
-        self.free.push(slot);
+    /// Sets `data` aside, compressed or not, and appends where it is to `parts`: its length, the length of what is
+    /// written (with [`STORED`] when not compressed), and the units it is in.
+    fn write(&mut self, data: &[u8], parts: &mut Vec<u32>, compress: bool) -> std::io::Result<()> {
+        let too_large = || std::io::Error::other("too large to set aside");
+        let raw = u32::try_from(data.len()).map_err(|_| too_large())?;
+        let compressed = if compress {
+            std::borrow::Cow::Owned(self.compressor.compress(data)?)
+        } else {
+            std::borrow::Cow::Borrowed(data)
+        };
+        let len = u32::try_from(compressed.len())
+            .ok()
+            .filter(|l| l & STORED == 0)
+            .ok_or_else(too_large)?;
+        parts.reserve_exact(2 + compressed.len().div_ceil(SPILL_UNIT));
+        parts.push(raw);
+        parts.push(if compress { len } else { len | STORED });
+        let at = parts.len();
+        for _ in 0..compressed.len().div_ceil(SPILL_UNIT) {
+            let unit = if let Some(unit) = self.free.pop() {
+                unit
+            } else {
+                self.units = self
+                    .units
+                    .checked_add(1)
+                    .ok_or_else(|| std::io::Error::other("the spill file is full (2^32 units)"))?;
+                self.units - 1
+            };
+            parts.push(unit);
+        }
+        let units = parts.get_mut(at..).unwrap_or_default();
+        // Units taken from the end of the file are adjacent: written at once.
+        units.sort_unstable();
+        for (first, at, count) in Self::runs(units) {
+            let from = at * SPILL_UNIT;
+            let to = ((at + count) * SPILL_UNIT).min(compressed.len());
+            self.file.write_all_at(
+                compressed.get(from..to).unwrap_or_default(),
+                u64::from(first) * SPILL_UNIT as u64,
+            )?;
+        }
+        self.bytes += u64::from(len);
+        self.max_bytes = self.max_bytes.max(self.bytes);
+        Ok(())
+    }
+
+    /// The parts of `parts`: (length, compressed length, units).
+    fn parts(mut parts: &[u32]) -> impl Iterator<Item = (u32, u32, &[u32])> {
+        std::iter::from_fn(move || {
+            let (&raw, rest) = parts.split_first()?;
+            let (&len, rest) = rest.split_first()?;
+            let (units, rest) =
+                rest.split_at_checked(((len & !STORED) as usize).div_ceil(SPILL_UNIT))?;
+            parts = rest;
+            Some((raw, len, units))
+        })
+    }
+
+    /// Reads back what was set aside into `out` (its length), and frees its units.
+    fn read(
+        &mut self,
+        (raw, len, units): (u32, u32, &[u32]),
+        out: &mut [u8],
+    ) -> std::io::Result<()> {
+        if out.len() != raw as usize {
+            return Err(std::io::Error::other("spill: wrong length"));
+        }
+        let stored = len & STORED != 0;
+        let len = len & !STORED;
+        let mut buf = std::mem::take(&mut self.buf);
+        let into: &mut [u8] = if stored {
+            out
+        } else {
+            buf.resize(len as usize, 0);
+            &mut buf
+        };
+        for (first, at, count) in Self::runs(units) {
+            let from = at * SPILL_UNIT;
+            let to = ((at + count) * SPILL_UNIT).min(into.len());
+            self.file.read_exact_at(
+                into.get_mut(from..to).unwrap_or_default(),
+                u64::from(first) * SPILL_UNIT as u64,
+            )?;
+        }
+        if !stored && self.decompressor.decompress_to_buffer(&buf, out)? != out.len() {
+            return Err(std::io::Error::other("spill: short data"));
+        }
+        self.buf = buf;
+        self.free.extend_from_slice(units);
+        self.bytes -= u64::from(len);
         Ok(())
     }
 
     fn put(&mut self, page_no: u32, page: &[u8]) -> std::io::Result<()> {
-        let slot = self.write(page)?;
-        self.pages.insert(page_no, slot);
+        let mut parts = Vec::new();
+        // Pages are claimed soon, most of them: not worth compressing.
+        self.write(page, &mut parts, false)?;
+        self.pages.insert(page_no, parts.into_boxed_slice());
         Ok(())
     }
 
+    /// Reads a page set aside into `buf` (a page), if there is one.
     fn take(&mut self, page_no: u32, buf: &mut [u8]) -> std::io::Result<bool> {
-        let Some(slot) = self.pages.remove(&page_no) else {
+        let Some(parts) = self.pages.remove(&page_no) else {
             return Ok(false);
         };
-        self.read(slot, buf)?;
+        for part in Self::parts(&parts) {
+            self.read(part, buf)?;
+        }
         Ok(true)
     }
 
-    /// Sets aside the part of a row read so far.
-    fn hold(&mut self, data: &[u8]) -> std::io::Result<Held> {
-        let slots = data
-            .chunks(self.page_size)
-            .map(|chunk| self.write(chunk))
-            .collect::<std::io::Result<_>>()?;
-        Ok(Held::Spilled {
-            len: data.len(),
-            slots,
-        })
-    }
-
-    /// Reads back the part of a row set aside, into a buffer with room for the whole row.
-    fn unhold(&mut self, len: usize, slots: &[u32], total: usize) -> std::io::Result<Vec<u8>> {
-        let mut data = vec![0u8; len];
-        data.reserve_exact(total.saturating_sub(len));
-        for (&slot, chunk) in slots.iter().zip(data.chunks_mut(self.page_size)) {
-            self.read(slot, chunk)?;
+    /// Appends what was set aside to `out`.
+    fn read_to_end(&mut self, parts: &[u32], out: &mut Vec<u8>) -> std::io::Result<()> {
+        for part in Self::parts(parts) {
+            let start = out.len();
+            out.resize(start + part.0 as usize, 0);
+            self.read(part, out.get_mut(start..).unwrap_or_default())?;
         }
-        Ok(data)
+        Ok(())
     }
 }
 
@@ -326,13 +447,7 @@ fn scan_with<R: Read>(
         waiting: HashMap::new(),
         waiting_memory: 0,
         max_waiting_memory: waiting_memory,
-        spill: Spill {
-            file: spill_file,
-            page_size,
-            slots: 0,
-            free: Vec::new(),
-            pages: HashMap::new(),
-        },
+        spill: Spill::new(spill_file)?,
         stats: ScanStats::default(),
         ambiguous_index_interior: page_count >= u32::from(INDEX_INTERIOR) << 24,
     };
@@ -367,6 +482,7 @@ fn scan_with<R: Read>(
             pending.rowid
         )));
     }
+    state.stats.max_spill_bytes = state.spill.max_bytes;
     Ok(state.stats)
 }
 
@@ -411,16 +527,20 @@ impl Scanner {
         on_row: &mut RowFn<'_>,
     ) -> Result<(), SqliteError> {
         if let Some(waiting) = self.waiting.remove(&page_no) {
-            let data = match waiting.data {
+            let total = waiting.total as usize;
+            let spilled_len = waiting.spilled_len as usize;
+            let (spilled, data) = match waiting.held {
                 Held::Memory(data) => {
                     self.waiting_memory -= data.capacity();
-                    data
+                    (Box::default(), data)
                 }
-                Held::Spilled { len, slots } => self.spill.unhold(len, &slots, waiting.total)?,
+                Held::Spilled(parts) => (parts, Vec::with_capacity(total - spilled_len)),
             };
             let pending = Pending {
                 rowid: waiting.rowid,
-                total: waiting.total,
+                total,
+                spilled,
+                spilled_len,
                 data,
             };
             return self.overflow(pending, page, chased, on_row);
@@ -494,6 +614,8 @@ impl Scanner {
             let pending = Pending {
                 rowid,
                 total: len,
+                spilled: Box::default(),
+                spilled_len: 0,
                 data,
             };
             self.chase(pending, first, chased, on_row)?;
@@ -516,7 +638,7 @@ impl Scanner {
     /// Adds an overflow page's content to a row; returns the next overflow page.
     fn append(&self, pending: &mut Pending, page: &[u8]) -> Result<u32, SqliteError> {
         let next = be_u32(page, 0).unwrap_or(0);
-        let take = (pending.total - pending.data.len()).min(self.usable - 4);
+        let take = (pending.total - pending.len()).min(self.usable - 4);
         let content = page
             .get(4..4 + take)
             .ok_or_else(|| SqliteError::Malformed("short overflow page".to_owned()))?;
@@ -531,18 +653,30 @@ impl Scanner {
                 "two rows share overflow page {next}"
             )));
         }
-        let data = if self.waiting_memory + pending.data.capacity() <= self.max_waiting_memory {
+        let too_large = || SqliteError::Malformed(format!("row {} is too large", pending.rowid));
+        let total = u32::try_from(pending.total).map_err(|_| too_large())?;
+        let mut spilled_len = pending.spilled_len;
+        let held = if pending.spilled.is_empty()
+            && self.waiting_memory + pending.data.capacity() <= self.max_waiting_memory
+        {
             self.waiting_memory += pending.data.capacity();
             Held::Memory(pending.data)
         } else {
-            self.spill.hold(&pending.data)?
+            let mut parts = pending.spilled.into_vec();
+            if !pending.data.is_empty() {
+                self.spill.write(&pending.data, &mut parts, true)?;
+                spilled_len += pending.data.len();
+            }
+            Held::Spilled(parts.into_boxed_slice())
         };
+        let spilled_len = u32::try_from(spilled_len).map_err(|_| too_large())?;
         self.waiting.insert(
             next,
             Waiting {
                 rowid: pending.rowid,
-                total: pending.total,
-                data,
+                total,
+                spilled_len,
+                held,
             },
         );
         self.stats.max_waiting_rows = self.stats.max_waiting_rows.max(self.waiting.len());
@@ -559,9 +693,15 @@ impl Scanner {
         on_row: &mut RowFn<'_>,
     ) -> Result<(), SqliteError> {
         loop {
-            if pending.data.len() >= pending.total {
+            if pending.len() >= pending.total {
                 self.stats.rows += 1;
-                return on_row(pending.rowid, &pending.data).map_err(SqliteError::Row);
+                if pending.spilled.is_empty() {
+                    return on_row(pending.rowid, &pending.data).map_err(SqliteError::Row);
+                }
+                let mut row = Vec::with_capacity(pending.total);
+                self.spill.read_to_end(&pending.spilled, &mut row)?;
+                row.extend_from_slice(&pending.data);
+                return on_row(pending.rowid, &row).map_err(SqliteError::Row);
             }
             if next == 0 {
                 return Err(SqliteError::Malformed(format!(
@@ -700,5 +840,75 @@ mod tests {
         assert_eq!(be_int(&[0xff]), -1);
         assert_eq!(be_int(&[0x01, 0x00]), 256);
         assert_eq!(be_int(&[0x80, 0, 0, 0, 0, 0]), -(1 << 47));
+    }
+
+    #[test]
+    fn spill_reuses_claimed_units() {
+        let path = std::env::temp_dir().join(format!(
+            "lrclib-mirror-spill-{}-{}",
+            std::process::id(),
+            rand_suffix()
+        ));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        let mut spill = Spill::new(file).unwrap();
+        // Incompressible data, so that it takes space.
+        let mut x = 0x2545_f491_4f6c_dd1d_u64;
+        let mut noise = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x.to_le_bytes()[0]
+                })
+                .collect()
+        };
+        let read = |spill: &mut Spill, s: &[u32]| {
+            let mut out = b"before".to_vec();
+            spill.read_to_end(s, &mut out).unwrap();
+            assert_eq!(&out[..6], b"before");
+            out.split_off(6)
+        };
+        let rows: Vec<Vec<u8>> = (0..100).map(|i| noise(100 + i * 97)).collect();
+        // Each row set aside in two parts.
+        let write = |spill: &mut Spill, r: &[u8]| {
+            let mut parts = Vec::new();
+            let (a, b) = r.split_at(r.len() / 3);
+            spill.write(a, &mut parts, true).unwrap();
+            spill.write(b, &mut parts, false).unwrap();
+            assert_eq!(Spill::parts(&parts).count(), 2);
+            parts
+        };
+        let mut held: Vec<Option<Vec<u32>>> =
+            rows.iter().map(|r| Some(write(&mut spill, r))).collect();
+        let page = noise(4096);
+        spill.put(7, &page).unwrap();
+        let peak = spill.units;
+        let mut buf = vec![0u8; 4096];
+        assert!(!spill.take(8, &mut buf).unwrap());
+        assert!(spill.take(7, &mut buf).unwrap());
+        assert_eq!(buf, page);
+        // Every other row is claimed, and set aside again in units of others.
+        for i in (0..rows.len()).step_by(2) {
+            let s = held[i].take().unwrap();
+            assert_eq!(read(&mut spill, &s), rows[i]);
+        }
+        for i in (0..rows.len()).step_by(2).rev() {
+            held[i] = Some(write(&mut spill, &rows[i]));
+        }
+        assert!(spill.units <= peak, "{} > {peak}", spill.units);
+        for (row, s) in rows.iter().zip(&held) {
+            assert_eq!(&read(&mut spill, s.as_ref().unwrap()), row);
+        }
+        assert_eq!(spill.bytes, 0);
+        assert!(spill.max_bytes > rows.iter().map(|r| r.len() as u64).sum::<u64>());
+        assert!(std::fs::metadata(&path).unwrap().len() <= u64::from(peak) * SPILL_UNIT as u64);
+        std::fs::remove_file(&path).unwrap();
     }
 }

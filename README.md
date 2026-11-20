@@ -102,8 +102,8 @@ indexes bucket by bucket. Measured on the 2026-10-30 dump (34.6 M tracks):
 
 The 2026-11-19 dump (34.9 M tracks, 64 GB `.gz`) is laid out differently: the lyrics table's leaf pages come long
 before their overflow pages, so most lyrics rows can't be finished when their leaf goes by. Up to 4.4 M rows wait at
-once; beyond 64 MB they wait on disk, next to the pages that come early. Importing it with 3 threads and 2560 MB, in
-a cgroup limited to 4 GB, took 36 min, 3.5 GB of memory at the peak and 76 GB of temporary disk.
+once; beyond 64 MB they wait on disk, compressed (27 GB of rows in 9 GB). Importing it with 3 threads and 2560 MB,
+in a cgroup limited to 4 GB, took 42 min, 2.1 GB of memory at the peak and 41 GB of temporary disk.
 
 Reading the dump (unpacking 270 GB of gzip, picking out the rows) takes two thirds of it; the unpacking is a single
 stream, so more cores help the rest more than it.
