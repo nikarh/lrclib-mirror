@@ -172,7 +172,7 @@ Flags, each with an environment variable fallback:
 | `--data-dir` | `LRCLIB_MIRROR_DATA_DIR` | `/data` | Stores (`stores/`) and dumps to import (`dumps/`) |
 | `--listen` | `LRCLIB_MIRROR_LISTEN` | `0.0.0.0:3300` | HTTP address |
 | `--update-schedule` | `LRCLIB_MIRROR_UPDATE_SCHEDULE` | `34 2 * * *` | When to look for a newer dump, besides at start: a cron expression (`minute hour day month weekday`, e.g. `0 */6 * * *`, `30 4 * * mon`, or `@daily`) in the time zone of `TZ` (see below); `off`: never. The default is every day at 02:34; after a failed check the next one comes within an hour |
-| `--min-free-gb` | `LRCLIB_MIRROR_MIN_FREE_GB` | `100` | Free space an import needs to start (what an interrupted import of the same dump has counts as free) |
+| `--min-free-gb` | `LRCLIB_MIRROR_MIN_FREE_GB` | `60` | Free space an import needs to start (what an interrupted import of the same dump has counts as free) |
 | `--import-threads` | `LRCLIB_MIRROR_IMPORT_THREADS` | the CPUs (of the container's quota) | Threads importing a dump |
 | `--import-memory` | `LRCLIB_MIRROR_IMPORT_MEMORY` | 60% of the container's limit or the machine's memory, 768 to 4096 | MB an import may take, roughly (at least 768) |
 | `--listing-url` | `LRCLIB_MIRROR_LISTING_URL` | LRCLIB's | The dump listing |
