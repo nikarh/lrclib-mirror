@@ -26,10 +26,11 @@ use crate::text::{normalize, plain_from_lrc, synced_skeleton};
 use super::file;
 
 use super::{
-    FORMAT_VERSION, IDS, L_INSTRUMENTAL, L_LF_SHIFT, L_PLAIN_SHIFT, L_SYNCED_SHIFT, L_WORD_SYNC,
-    LYRICS, LYRICS_BLOCK_BYTES, LYRICS_DICT, LYRICS_INDEX, META, Meta, Reader, SEARCH, T_ALBUM,
-    T_ALBUM_LOWER, T_ARTIST, T_ARTIST_LOWER, T_BROKEN, T_DURATION, T_NAME, T_NAME_LOWER, TRACKS,
-    TRACKS_DICT, TRACKS_INDEX, TRACKS_PER_BLOCK, mode, put_bytes, put_varint, sort_key, track_meta,
+    FORMAT_VERSION, IDS, L_INSTRUMENTAL, L_LF_PACKED, L_LF_SHIFT, L_PLAIN_SHIFT, L_SYNCED_SHIFT,
+    L_WORD_SYNC, LYRICS, LYRICS_BLOCK_BYTES, LYRICS_DICT, LYRICS_INDEX, META, Meta, Reader, SEARCH,
+    T_ALBUM, T_ALBUM_LOWER, T_ARTIST, T_ARTIST_LOWER, T_BROKEN, T_DURATION, T_NAME, T_NAME_LOWER,
+    TRACKS, TRACKS_DICT, TRACKS_INDEX, TRACKS_PER_BLOCK, mode, put_bytes, put_varint, sort_key,
+    track_meta,
 };
 
 /// Tracks are spread over this many buckets (by the top bits of their sort key) between the two passes.
@@ -136,6 +137,8 @@ pub struct ImportStats {
     pub lyricsfile_built: u64,
     pub lyricsfile_head: u64,
     pub lyricsfile_text: u64,
+    /// Of `lyricsfile_text`, stored packed.
+    pub lyricsfile_packed: u64,
     pub lower_exceptions: u64,
     pub broken_tracks: u64,
     /// Buckets too large for the memory, made in parts.
@@ -891,6 +894,7 @@ struct Counters {
     synced_skeleton: AtomicU64,
     lyricsfile_head: AtomicU64,
     lyricsfile_text: AtomicU64,
+    lyricsfile_packed: AtomicU64,
 }
 
 impl Counters {
@@ -899,6 +903,7 @@ impl Counters {
         stats.synced_skeleton += self.synced_skeleton.load(Ordering::Relaxed);
         stats.lyricsfile_head += self.lyricsfile_head.load(Ordering::Relaxed);
         stats.lyricsfile_text += self.lyricsfile_text.load(Ordering::Relaxed);
+        stats.lyricsfile_packed += self.lyricsfile_packed.load(Ordering::Relaxed);
     }
 }
 
@@ -1080,8 +1085,16 @@ fn reduce(row: &LyricsRow, out: &mut Vec<u8>, counters: &Counters) {
         mode::TEXT => counters.lyricsfile_text.fetch_add(1, Ordering::Relaxed),
         _ => 0,
     };
+    let packed = match (lf_mode, &row.lyricsfile) {
+        (mode::TEXT, Some(lf)) => super::pack::pack(lf, plain),
+        _ => None,
+    };
     let mut flags =
         (plain_mode << L_PLAIN_SHIFT) | (synced_mode << L_SYNCED_SHIFT) | (lf_mode << L_LF_SHIFT);
+    if packed.is_some() {
+        counters.lyricsfile_packed.fetch_add(1, Ordering::Relaxed);
+        flags |= L_LF_PACKED;
+    }
     if row.instrumental {
         flags |= L_INSTRUMENTAL;
     }
@@ -1104,7 +1117,9 @@ fn reduce(row: &LyricsRow, out: &mut Vec<u8>, counters: &Counters) {
         (mode::HEAD, Some(h)) => put_bytes(out, h.as_bytes()),
         (mode::TEXT, _) => put_bytes(
             out,
-            row.lyricsfile.as_deref().unwrap_or_default().as_bytes(),
+            packed
+                .as_deref()
+                .unwrap_or(row.lyricsfile.as_deref().unwrap_or_default().as_bytes()),
         ),
         _ => {}
     }

@@ -5,7 +5,7 @@ copy of LRCLIB's [public database dump](https://lrclib.net/db-dumps), which it k
 a music library needs lyrics for many tracks: no rate limits, no network round trips.
 
 The dump is a ~50 GB download that unpacks to a ~270 GB SQLite database (2026). lrclib-mirror never unpacks it:
-it reads the rows out of the download as it streams in and builds a store of **9.3 GB** (search index included),
+it reads the rows out of the download as it streams in and builds a store of **9–14 GB** (search index included),
 which answers the API as LRCLIB's server does, byte for byte, about twice as fast: a lookup in well under a
 millisecond.
 
@@ -50,7 +50,7 @@ can be computed from the rest:
 | What | Dump | Store |
 | --- | --- | --- |
 | Lyrics versions | 35.1 M | 34.6 M (only the current ones) |
-| Lyricsfiles | 3.7 KB each, 60% of the bytes | ~97% are what LRCLIB's server builds from the track and its lyrics, and aren't stored; ~4% differ only in their metadata, which alone is kept |
+| Lyricsfiles | 3.7 KB each, 60% of the bytes | ~97% are what LRCLIB's server builds from the track and its lyrics, and aren't stored; ~4% differ only in their metadata, which alone is kept. Those written by their authors (timings in milliseconds, word timings) are packed: timings as differences, a word as its length in its line's text, the plain lyrics left out when they are the row's |
 | Synced lyrics | stored | ~62% repeat the plain lyrics line by line: only the timestamps are kept |
 | Plain lyrics | stored | ~3% are the synced ones without timestamps, and aren't stored |
 | Normalized names (for lookups) | stored, and indexed | computed (kept for the 0.03% LRCLIB normalized differently in the past) |
@@ -67,8 +67,8 @@ imports the dump again rather than serve it (the API answers `503` until then).
 | | Dump (SQLite + LRCLIB's search index) | Store |
 | --- | --- | --- |
 | Download | 49 GB (gzip) | the same |
-| On disk | 268.6 GB + 2.5 GB | 9.25 GB: lyrics 6.80, tracks 0.90, search index 1.37, id map 0.16 |
-| Disk while updating | old + new database, the new one unpacked: ~540 GB | old store + the new one and its temporary files: ~32 GB |
+| On disk | 268.6 GB + 2.5 GB | 9.25 GB: lyrics 6.80, tracks 0.90, search index 1.37, id map 0.16 (2026-11-19, with 5.5 M Lyricsfiles written by their authors: 13.4 GB, lyrics 10.95) |
+| Disk while updating | old + new database, the new one unpacked: ~540 GB | old store + the new one and its temporary files: ~32 GB (2026-11-19: ~55 GB) |
 
 ### Speed
 

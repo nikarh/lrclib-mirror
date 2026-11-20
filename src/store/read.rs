@@ -13,10 +13,10 @@ use crate::search::Search;
 use crate::text::{normalize, plain_from_lrc, synced_from_skeleton};
 
 use super::{
-    FORMAT_VERSION, IDS, L_INSTRUMENTAL, L_LF_SHIFT, L_PLAIN_SHIFT, L_SYNCED_SHIFT, L_WORD_SYNC,
-    LYRICS, LYRICS_DICT, LYRICS_INDEX, META, Meta, Reader, SEARCH, T_ALBUM, T_ALBUM_LOWER,
-    T_ARTIST, T_ARTIST_LOWER, T_BROKEN, T_DURATION, T_NAME, T_NAME_LOWER, TRACKS, TRACKS_DICT,
-    TRACKS_INDEX, mode, sort_key, track_meta,
+    FORMAT_VERSION, IDS, L_INSTRUMENTAL, L_LF_PACKED, L_LF_SHIFT, L_PLAIN_SHIFT, L_SYNCED_SHIFT,
+    L_WORD_SYNC, LYRICS, LYRICS_DICT, LYRICS_INDEX, META, Meta, Reader, SEARCH, T_ALBUM,
+    T_ALBUM_LOWER, T_ARTIST, T_ARTIST_LOWER, T_BROKEN, T_DURATION, T_NAME, T_NAME_LOWER, TRACKS,
+    TRACKS_DICT, TRACKS_INDEX, mode, sort_key, track_meta,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -660,13 +660,18 @@ fn decode_lyrics<'a>(entry: &'a [u8], track: &Track<'_>) -> Option<Lyrics<'a>> {
         Some(r.string()?)
     };
     let stored_lf = if matches!(lf_mode, mode::TEXT | mode::HEAD) {
-        Some(r.string()?)
+        let n = usize::try_from(r.varint()?).ok()?;
+        Some(r.bytes(n)?)
     } else {
         None
     };
     let (plain, synced) = lyrics_texts(plain_mode, synced_mode, plain, synced);
     let lyricsfile = match lf_mode {
-        mode::TEXT => stored_lf.map(Cow::Borrowed),
+        mode::TEXT if flags & L_LF_PACKED != 0 => Some(Cow::Owned(super::pack::unpack(
+            stored_lf?,
+            plain.as_deref(),
+        )?)),
+        mode::TEXT => Some(Cow::Borrowed(std::str::from_utf8(stored_lf?).ok()?)),
         mode::DERIVED => {
             let meta = track_meta(track.name, track.artist, track.album, track.duration);
             let mut lf = lyricsfile::head(&meta, instrumental)?;
@@ -678,7 +683,7 @@ fn decode_lyrics<'a>(entry: &'a [u8], track: &Track<'_>) -> Option<Lyrics<'a>> {
             Some(Cow::Owned(lf))
         }
         mode::HEAD => {
-            let mut lf = stored_lf?.to_owned();
+            let mut lf = std::str::from_utf8(stored_lf?).ok()?.to_owned();
             lf.push_str(&lyricsfile::body(
                 plain.as_deref(),
                 synced.as_deref(),

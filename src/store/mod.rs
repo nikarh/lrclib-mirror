@@ -20,11 +20,12 @@
 //! Lyrics are stored as LRCLIB's server answers them, but without what can be computed back exactly (checked for
 //! every row when importing): plain lyrics that are the synced ones without timestamps, synced lyrics whose lines
 //! are the plain ones (only the timestamps are kept), and Lyricsfiles that are what the server builds from the track
-//! and its lyrics (or that differ only in their metadata). Names normalized for lookups are stored only when they
+//! and its lyrics (or that differ only in their metadata). Other Lyricsfiles are kept in a compact form ([`pack`]). Names normalized for lookups are stored only when they
 //! aren't what the normalization gives today.
 
 pub mod file;
 mod import;
+mod pack;
 mod read;
 
 pub use import::{
@@ -35,7 +36,7 @@ pub use read::{BlockBuf, LyricsFlags, Scratch, Store, StoreError, Track, with_sc
 
 use std::path::Path;
 
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 pub const TRACKS_PER_BLOCK: usize = 128;
 pub const LYRICS_BLOCK_BYTES: usize = 64 << 10;
 
@@ -113,8 +114,17 @@ pub fn derivations() -> u64 {
             );
         }
     }
+    // Packed Lyricsfiles: words and plain lyrics are written back as the YAML writer writes them.
+    let packed = pack::pack(pack::SAMPLE, Some(pack::SAMPLE_PLAIN)).unwrap_or_default();
+    let mut bytes = out.into_bytes();
+    bytes.extend_from_slice(&packed);
+    bytes.extend_from_slice(
+        pack::unpack(&packed, Some(pack::SAMPLE_PLAIN))
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in std::iter::once(VERSION).chain(out.bytes()) {
+    for b in std::iter::once(VERSION).chain(bytes) {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
@@ -203,6 +213,8 @@ const L_SYNCED_SHIFT: u32 = 2;
 const L_LF_SHIFT: u32 = 4;
 const L_INSTRUMENTAL: u32 = 1 << 6;
 const L_WORD_SYNC: u32 = 1 << 7;
+/// The Lyricsfile is stored packed ([`pack`]).
+const L_LF_PACKED: u32 = 1 << 9;
 
 /// How a text of a lyrics entry is stored.
 mod mode {

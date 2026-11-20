@@ -114,6 +114,78 @@ fn lyrics_text(rng: &mut Rng) -> (String, String) {
     (plain.join("\n"), synced.join("\n"))
 }
 
+/// A Lyricsfile as their authors write them: timings in milliseconds, word timings, metadata of their own, and now
+/// and then something unusual.
+fn authored(
+    rng: &mut Rng,
+    meta: &lyricsfile::Meta<'_>,
+    synced: &str,
+    plain: Option<&str>,
+) -> String {
+    use lrclib_mirror::yaml::write_value;
+    use std::fmt::Write as _;
+    let mut out = String::from("version: '1.0'\nmetadata:\n  title: ");
+    write_value(&mut out, meta.title, 4).unwrap_or_else(|| out.push_str("x\n"));
+    out.push_str("  artist: ");
+    write_value(&mut out, meta.artist, 4).unwrap_or_else(|| out.push_str("x\n"));
+    out.push_str("  instrumental: false\n  language: en\nlines:\n");
+    for line in synced.lines() {
+        let Some((stamp, text)) = line.strip_prefix('[').and_then(|l| l.split_once(']')) else {
+            continue;
+        };
+        let Some((m, rest)) = stamp.split_once(':') else {
+            continue;
+        };
+        let (Ok(m), Ok(s)) = (m.parse::<u64>(), rest.parse::<f64>()) else {
+            continue;
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let start = m * 60_000 + (s * 1000.0) as u64 + rng.below(10);
+        let text = text.trim();
+        out.push_str("- text: ");
+        if write_value(&mut out, text, 4).is_none() {
+            out.push_str("'?'\n");
+            continue;
+        }
+        if rng.below(4) == 0 {
+            out.push_str("  words: []\n");
+        }
+        let _ = write!(
+            out,
+            "  start_ms: {start}\n  end_ms: {}\n",
+            start + 400 + rng.below(3000)
+        );
+        if rng.below(3) == 0 {
+            continue;
+        }
+        out.push_str("  words:\n");
+        let words: Vec<&str> = text.split_inclusive(' ').collect();
+        let mut t = start;
+        for (i, w) in words.iter().enumerate() {
+            out.push_str("  - text: ");
+            // Now and then a word that isn't in the line.
+            let w = if rng.below(20) == 0 { "true" } else { w };
+            if write_value(&mut out, w, 4).is_none() {
+                out.push_str("'true'\n");
+            }
+            let _ = writeln!(out, "    start_ms: {t}");
+            if i + 1 == words.len() && rng.below(2) == 0 {
+                let _ = writeln!(out, "    end_ms: {}", t + 120);
+            }
+            t += 50 + rng.below(400);
+        }
+    }
+    if let Some(p) = plain {
+        out.push_str("plain: ");
+        if rng.below(5) == 0 {
+            out.push_str("other\n");
+        } else {
+            write_value(&mut out, p, 2).unwrap_or_else(|| out.push_str("'?'\n"));
+        }
+    }
+    out
+}
+
 pub fn build_db(path: &Path) -> Connection {
     let conn = Connection::open(path).unwrap();
     conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
@@ -202,6 +274,12 @@ pub fn build_db(path: &Path) -> Connection {
         let built = lyricsfile::build(&meta, plain.as_deref(), synced.as_deref(), instrumental);
         let (lf, word_sync): (Option<String>, bool) = match rng.below(10) {
             0 => (None, false),
+            3 if rng.below(2) == 0 => (
+                synced
+                    .as_deref()
+                    .map(|s| authored(&mut rng, &meta, s, plain.as_deref())),
+                true,
+            ),
             1 => (
                 Some(
                     "version: '1.0'\nlines:\n- text: Hi\n  start_ms: 1\n  words:\n  - text: Hi\n"
