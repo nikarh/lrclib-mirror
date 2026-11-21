@@ -10,7 +10,7 @@ COPY web/ ./
 RUN npm run build
 
 # A static musl binary with the web search embedded.
-FROM rust:1.99.1-alpine AS build
+FROM rust:1.100.0-alpine AS build
 RUN apk add --no-cache musl-dev gcc ca-certificates
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
